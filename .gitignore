@@ -221,3 +221,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local camera and SD configuration
+/.config/
+/ipcam.json
+/ipcam.json.*
+/sd-card/wpa_supplicant.conf
+/sd-card/lan-probe-ip

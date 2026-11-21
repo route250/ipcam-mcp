@@ -1,0 +1,14 @@
+[Unit]
+Description=LAN IP camera browser and MCP server
+
+[Service]
+Type=simple
+WorkingDirectory=%h/ipcam-mcp
+ExecStart=%h/ipcam-mcp/.venv/bin/python -m ipcam_mcp --config .config/ipcam-server.json --port 9928
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

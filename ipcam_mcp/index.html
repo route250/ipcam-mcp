@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LANカメラ</title>
+<style>
+  :root { color-scheme: dark; --bg:#101417; --panel:#1a2126; --line:#36454c; --ink:#f2f5f4; --muted:#b4c0c4; --accent:#a8e8d1; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
+  main { width:min(100% - 32px, 924px); margin:36px auto; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
+  h1 { margin:0; font-size:24px; }
+  h2 { margin:0; font-size:15px; }
+  #connection { color:var(--accent); font-size:14px; }
+  .layout { display:grid; grid-template-columns:minmax(0, 640px) minmax(214px, 1fr); gap:16px; align-items:start; }
+  figure { margin:0; width:100%; aspect-ratio:16/9; position:relative; display:grid; place-items:center; background:#070a0c; border-radius:12px; overflow:hidden; }
+  figure img { position:absolute; width:100%; height:100%; object-fit:contain; }
+  [hidden] { display:none !important; }
+  #placeholder { color:var(--muted); padding:12px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .side { display:grid; gap:12px; }
+  #pad { position:relative; display:grid; place-items:center; width:150px; aspect-ratio:1; margin:16px auto 8px; background:#283238; border:1px solid #66767d; color:var(--ink); border-radius:50%; touch-action:none; user-select:none; cursor:grab; font:inherit; }
+  #pad:disabled { opacity:.5; cursor:default; }
+  #pad:active { cursor:grabbing; }
+  #pad:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+  #pad span { position:absolute; pointer-events:none; }
+  #pad [data-dir="up"] { top:12px; }
+  #pad [data-dir="down"] { bottom:12px; }
+  #pad [data-dir="left"] { left:16px; }
+  #pad [data-dir="right"] { right:16px; }
+  #pad [data-dir="center"] { width:20%; height:20%; border:1px solid #94a5aa; border-radius:50%; }
+  #pad[data-direction="up"] [data-dir="up"], #pad[data-direction="down"] [data-dir="down"],
+  #pad[data-direction="left"] [data-dir="left"], #pad[data-direction="right"] [data-dir="right"] { color:var(--accent); transform:scale(1.25); }
+  #motion { margin:0; color:var(--muted); font-size:13px; min-height:1.5em; text-align:center; }
+  dl { display:grid; grid-template-columns:auto 1fr; column-gap:12px; row-gap:6px; margin:12px 0 0; font-size:14px; }
+  dt { color:var(--muted); }
+  dd { margin:0; text-align:right; font-variant-numeric:tabular-nums; }
+  @media (max-width:700px) { main { margin:20px auto; } .layout { grid-template-columns:1fr; } .side { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width:420px) { .side { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>LANカメラ</h1><span id="connection" role="status">カメラを確認中</span></header>
+  <div class="layout">
+    <figure>
+      <span id="placeholder">映像を待機中</span>
+      <img id="video" width="640" height="360" alt="カメラのライブ映像" hidden>
+    </figure>
+    <div class="side">
+      <section aria-labelledby="control-title">
+        <h2 id="control-title">パン・チルト</h2>
+        <button id="pad" type="button" aria-label="方向パッド。ドラッグまたは矢印キーで操作" disabled>
+          <span data-dir="up" aria-hidden="true">▲</span><span data-dir="down" aria-hidden="true">▼</span>
+          <span data-dir="left" aria-hidden="true">◀</span><span data-dir="right" aria-hidden="true">▶</span>
+          <span data-dir="center" aria-hidden="true"></span>
+        </button>
+        <p id="motion" role="status">停止中</p>
+      </section>
+      <section aria-labelledby="measure-title">
+        <h2 id="measure-title">カメラ情報</h2>
+        <dl>
+          <dt>パン（推定）</dt><dd id="pan">取得不可</dd>
+          <dt>パンのステップ値</dt><dd id="pan-steps">取得不可</dd>
+          <dt>チルト（推定）</dt><dd id="tilt">取得不可</dd>
+          <dt>チルトのステップ値</dt><dd id="tilt-steps">取得不可</dd>
+          <dt>温度</dt><dd id="temperature">取得不可</dd>
+          <dt>相対湿度</dt><dd id="humidity">取得不可</dd>
+        </dl>
+      </section>
+    </div>
+  </div>
+</main>
+<script>
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const video = $("video"), placeholder = $("placeholder"), pad = $("pad");
+  const cameraLabels = {discovering:"カメラを探索中", connecting:"映像に接続中", ready:"配信中"};
+  const motionLabels = {idle:"停止中", manual:"手動移動中", goto:"角度指定で移動中", stopping:"停止処理中", stop_unconfirmed:"停止を確認できません"};
+  const errors = {busy:"ほかの操作が実行中です", camera_unavailable:"カメラに接続できません",
+    motion_failed:"操作を終了しました。パッドを離してください", stop_unconfirmed:"停止を確認できません"};
+  const keys = {ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right"};
+  let ws, pointer = null, key = null, direction = null, cameraReady = false;
+
+  function refreshPad() {
+    pad.disabled = !(cameraReady && ws?.readyState === WebSocket.OPEN);
+    if (pad.disabled) release();
+  }
+  function openControl() {
+    ws = new WebSocket("ws://" + location.host + "/api/ptz");
+    ws.onopen = refreshPad;
+    ws.onclose = () => { refreshPad(); setTimeout(openControl, 1000); };
+    ws.onmessage = ({data}) => {
+      const event = JSON.parse(data);
+      if (event.ok === false) $("motion").textContent = errors[event.code] ?? event.message;
+      else if (event.ptz_state) $("motion").textContent = motionLabels[event.ptz_state];
+    };
+  }
+  function send(type) {
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(type === "drive" ? {type, direction} : {type}));
+  }
+  function aim(next) {
+    if (direction === next) return;
+    direction = next;
+    pad.dataset.direction = next ?? "";
+    send(next ? "drive" : "stop");
+  }
+  function release() {
+    if (pointer !== null || key !== null || direction !== null) send("stop");
+    const captured = pointer;
+    pointer = key = direction = null;
+    pad.dataset.direction = "";
+    if (captured !== null && pad.hasPointerCapture(captured)) pad.releasePointerCapture(captured);
+  }
+  function movePointer(event) {
+    const box = pad.getBoundingClientRect(), radius = box.width / 2;
+    const x = event.clientX - box.left - radius, y = event.clientY - box.top - radius;
+    if (Math.hypot(x, y) <= radius * .2) aim(null);
+    else if (Math.abs(x) >= Math.abs(y)) aim(x >= 0 ? "right" : "left");
+    else aim(y >= 0 ? "down" : "up");
+  }
+  pad.onpointerdown = event => {
+    if (event.button !== 0 || pointer !== null || key !== null || pad.disabled) return;
+    event.preventDefault();
+    pad.focus();
+    pointer = event.pointerId;
+    pad.setPointerCapture(pointer);
+    movePointer(event);
+  };
+  pad.onpointermove = event => { if (pointer === event.pointerId) movePointer(event); };
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    pad.addEventListener(type, event => { if (pointer === event.pointerId) release(); });
+  }
+  pad.onkeydown = event => {
+    if (!keys[event.key] || pointer !== null || pad.disabled) return;
+    event.preventDefault();
+    key = event.key;
+    aim(keys[key]);
+  };
+  pad.onkeyup = event => { if (event.key === key) release(); };
+  pad.addEventListener("blur", release);
+  window.addEventListener("blur", release);
+  window.addEventListener("pagehide", release);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) release(); });
+  setInterval(() => { if (direction && !document.hidden) send("drive"); }, 100);
+
+  function showFeed(ready) {
+    if (ready && !video.hasAttribute("src")) video.src = "/api/stream.mjpg";
+    if (!ready) {
+      video.removeAttribute("src");
+      video.hidden = true;
+      placeholder.hidden = false;
+    }
+  }
+  video.onload = () => { video.hidden = false; placeholder.hidden = true; };
+  video.onerror = () => showFeed(false);
+
+  function showNumber(id, value, unit, missing = "取得不可", digits = 1) {
+    $(id).textContent = value === null ? missing : value.toFixed(digits) + unit;
+  }
+  async function poll() {
+    try {
+      const response = await fetch("/api/status", {signal:AbortSignal.timeout(2000)});
+      if (!response.ok) throw Error();
+      const status = await response.json();
+      $("connection").textContent = cameraLabels[status.state];
+      cameraReady = status.frame !== null;
+      showFeed(cameraReady);
+      $("motion").textContent = motionLabels[status.ptz_state];
+      const absent = status.position.status === "uncalibrated" ? "未校正" : "取得不可";
+      showNumber("pan", status.position.pan_degrees, "°", absent);
+      showNumber("tilt", status.position.tilt_degrees, "°", absent);
+      showNumber("pan-steps", status.position.pan_steps, " ステップ", "取得不可", 0);
+      showNumber("tilt-steps", status.position.tilt_steps, " ステップ", "取得不可", 0);
+      showNumber("temperature", status.environment.temperature_c, " ℃");
+      showNumber("humidity", status.environment.relative_humidity_percent, " %RH");
+    } catch {
+      cameraReady = false;
+      showFeed(false);
+      $("connection").textContent = "サーバーに再接続中";
+    } finally {
+      refreshPad();
+      setTimeout(poll, 1000);
+    }
+  }
+  openControl();
+  poll();
+</script>
+</body>
+</html>
