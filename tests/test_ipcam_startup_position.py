@@ -10,7 +10,7 @@ from ipaddress import IPv4Network
 class StartupPositionTest(unittest.IsolatedAsyncioTestCase):
     def state(self):
         return CameraState(Settings(IPv4Network('192.168.0.0/24'), None, 'id',
-                                    Path('/nonexistent'), Path('/nonexistent/state')))
+                                    Path('/nonexistent/state')))
 
     async def test_404_moves_once_then_reads_position(self):
         state = self.state()

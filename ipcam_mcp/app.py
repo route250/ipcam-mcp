@@ -12,6 +12,8 @@ from mcp.server.lowlevel import Server
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
+from tools import ipcam_angles
+from .audio import Audio
 from .ptz import ControlError, Controller
 from .state import CameraState
 
@@ -20,6 +22,23 @@ ORIGIN = f"http://{HOST}"
 NO_STORE = {"Cache-Control": "no-store"}
 INDEX = Path(__file__).with_name("index.html")
 EMPTY_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+ANGLE_PROPERTIES = {axis: {"type": "number", "minimum": low, "maximum": high}
+                    for axis, (low, high) in ipcam_angles.ANGLE_LIMITS.items()}
+STEP_PROPERTIES = {axis: {"type": "integer", "minimum": 0, "maximum": high}
+                   for axis, high in ipcam_angles.STEP_LIMITS.items()}
+
+
+def move_schema(properties):
+    return {"type": "object", "properties": properties, "additionalProperties": False,
+            "anyOf": [{"required": [axis]} for axis in properties]}
+
+
+async def move_target(controller, args, *, steps):
+    properties = STEP_PROPERTIES if steps else ANGLE_PROPERTIES
+    if set(args) - properties.keys() or any(value is None for value in args.values()):
+        raise ControlError("invalid_argument", f"Provide one or both of {', '.join(properties)}")
+    pan, tilt = (args.get(axis) for axis in properties)
+    return await controller.goto(pan, tilt, steps=steps)
 
 
 def mcp_app(state, controller, allowed_hosts=None):
@@ -29,14 +48,9 @@ def mcp_app(state, controller, allowed_hosts=None):
         types.Tool(name="camera_snapshot", description="Read a 640×360 JPEG and its frame-time measurements.",
                    inputSchema=EMPTY_SCHEMA, annotations=types.ToolAnnotations(readOnlyHint=True)),
         types.Tool(name="camera_goto", description="Move to calibrated pan/tilt angles in degrees.",
-                   inputSchema={
-                       "type": "object", "additionalProperties": False,
-                       "properties": {
-                           "pan_degrees": {"type": "number", "minimum": -177.5, "maximum": 177.5},
-                           "tilt_degrees": {"type": "number", "minimum": -30, "maximum": 90},
-                       },
-                       "anyOf": [{"required": ["pan_degrees"]}, {"required": ["tilt_degrees"]}],
-                   }),
+                   inputSchema=move_schema(ANGLE_PROPERTIES)),
+        types.Tool(name="camera_goto_steps", description="Move to absolute pan/tilt motor step counts.",
+                   inputSchema=move_schema(STEP_PROPERTIES)),
     ]
 
     async def list_tools(_context, _params):
@@ -46,10 +60,8 @@ def mcp_app(state, controller, allowed_hosts=None):
         args = params.arguments or {}
         content = []
         try:
-            if params.name == "camera_goto":
-                if set(args) - {"pan_degrees", "tilt_degrees"} or any(value is None for value in args.values()):
-                    raise ControlError("invalid_argument", "Provide pan_degrees or tilt_degrees as a JSON number")
-                data = await controller.goto(args.get("pan_degrees"), args.get("tilt_degrees"))
+            if params.name in {"camera_goto", "camera_goto_steps"}:
+                data = await move_target(controller, args, steps=params.name == "camera_goto_steps")
             elif params.name in {"camera_get_info", "camera_snapshot"}:
                 if args:
                     raise ControlError("invalid_argument", "This tool takes no arguments")
@@ -128,15 +140,25 @@ async def handle_ptz(websocket, controller):
     owner = object()
     queue = asyncio.Queue(maxsize=24)
     controller.subscribers[owner] = queue
+    movement = None
 
     async def send_events():
         while True:
             await websocket.send_json(await queue.get())
 
+    async def report_movement(args, *, steps):
+        try:
+            result = await move_target(controller, args, steps=steps)
+            reply = dict(type="goto_result", ok=True, **result)
+        except ControlError as error:
+            reply = dict(type="goto_result", ok=False, **error.response())
+        controller.notify(queue, reply)
+
     sender = asyncio.create_task(send_events())
     try:
         while True:
             raw = await websocket.receive_text()
+            result_type = None
             try:
                 payload = json.loads(raw) if len(raw) <= 256 else None
                 if not isinstance(payload, dict):
@@ -147,19 +169,34 @@ async def handle_ptz(websocket, controller):
                     controller.drive(owner, payload["direction"])
                 elif payload == {"type": "stop"}:
                     controller.stop_manual(owner)
+                elif payload == {"type": "homing"}:
+                    result_type = "homing_result"
+                    controller.start_homing(owner)
+                elif payload.get("type") in ("goto", "goto_steps"):
+                    result_type = "goto_result"
+                    if movement and not movement.done():
+                        raise ControlError("busy", "The previous target movement is still running")
+                    steps = payload.pop("type") == "goto_steps"
+                    movement = asyncio.create_task(report_movement(payload, steps=steps))
+                    continue
                 else:
                     raise ValueError
                 reply = dict(ok=True, ptz_state=controller.state.ptz_state)
             except ValueError:
-                reply = dict(ok=False, code="invalid_argument", message="Expected a drive or stop message")
+                reply = dict(ok=False, code="invalid_argument", message="Expected a PTZ operation")
             except ControlError as error:
                 reply = dict(ok=False, **error.response())
+                if result_type:
+                    reply["type"] = result_type
             controller.notify(queue, reply)
     except (WebSocketDisconnect, KeyError):
         pass
     finally:
         controller.stop_manual(owner)
         controller.subscribers.pop(owner, None)
+        if movement and not movement.done():
+            movement.cancel()
+            await asyncio.gather(movement, return_exceptions=True)
         sender.cancel()
         await asyncio.gather(sender, return_exceptions=True)
 
@@ -167,6 +204,7 @@ async def handle_ptz(websocket, controller):
 def create_app(settings, *, allowed_hosts=None):
     state = CameraState(settings)
     controller = Controller(state)
+    audio = Audio(state)
     mcp = mcp_app(state, controller, allowed_hosts)
 
     @asynccontextmanager
@@ -176,6 +214,7 @@ def create_app(settings, *, allowed_hosts=None):
             try:
                 yield
             finally:
+                await audio.close()
                 await controller.close()
                 camera_task.cancel()
                 await asyncio.gather(camera_task, return_exceptions=True)
@@ -183,6 +222,7 @@ def create_app(settings, *, allowed_hosts=None):
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalRequests, allowed_hosts=allowed_hosts)
     app.router.routes.extend(mcp.routes)
+    audio.attach(app)
 
     @app.get("/")
     async def index():

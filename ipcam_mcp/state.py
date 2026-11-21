@@ -17,7 +17,6 @@ from tools import camera_info, hank_environment, hank_ptz, ipcam_angles
 from . import camera
 
 LOG = logging.getLogger(__name__)
-ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_NETWORKS = tuple(map(IPv4Network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
 RETRY_DELAYS = (1, 2, 4, 8, 16, 30)
 READ_ERRORS = (OSError, ValueError, camera.CameraError, camera_info.CameraInfoError,
@@ -33,7 +32,6 @@ class Settings:
     lan: IPv4Network
     camera_host: str | None
     device_id: str | None
-    calibration_path: Path
     state_path: Path
 
     def accepts(self, host):
@@ -55,8 +53,8 @@ class Settings:
         host, device_id = data.get("camera_host"), data.get("device_id")
         if device_id is not None and (not isinstance(device_id, str) or not device_id.strip()):
             raise ValueError("device_id must be a nonempty string")
-        result = cls(lan, host, device_id, Path(data.get("calibration_path", ROOT / "ipcam.json")),
-                     path.with_name("ipcam-server-state.json"))
+        # Accept the old calibration_path key when loading existing setups.
+        result = cls(lan, host, device_id, path.with_name("ipcam-server-state.json"))
         if host is not None and (not isinstance(host, str) or not result.accepts(host)):
             raise ValueError("camera_host must be a unicast IPv4 address within lan_cidr")
         if not host and not device_id:
@@ -106,7 +104,6 @@ class CameraState:
     def __init__(self, settings):
         self.settings = settings
         self.host = None
-        self.calibration = None
         self.position = None
         self.samples = deque()
         self.frame = None
@@ -131,12 +128,11 @@ class CameraState:
             frame = snapshot.status["frame"] if snapshot else None
         position = dict(status="unavailable", sampled_at_utc=None, pan_steps=None, tilt_steps=None,
                         pan_degrees=None, tilt_degrees=None)
-        if self.position and now - self.position.received <= 2:
+        if (self.ptz_state not in {"homing", "homing_unconfirmed"}
+                and self.position and now - self.position.received <= 2):
             steps = self.position.value
-            position.update(steps, status="uncalibrated", sampled_at_utc=self.position.utc)
-            if self.calibration:
-                angle = ipcam_angles.angles_from_steps(self.calibration, steps)
-                position.update(status="ok", pan_degrees=angle["pan"], tilt_degrees=angle["tilt"])
+            position.update(steps, **ipcam_angles.angles_from_steps(steps),
+                            status="ok", sampled_at_utc=self.position.utc)
         samples = [sample for sample in self.samples if now - 5 < sample.received <= now]
         count = len(samples)
         environment = dict(status="unavailable", sampled_at_utc=None, temperature_c=None,
@@ -217,15 +213,6 @@ class CameraState:
             if temp:
                 temp.unlink(missing_ok=True)
 
-    def read_calibration(self, host):
-        try:
-            data = json.loads(self.settings.calibration_path.read_text())
-            if data.get("position_http_port", camera.HTTP_PORT) != camera.HTTP_PORT:
-                raise ValueError("calibration HTTP port differs")
-            return ipcam_angles.model(data, host, camera.PORT)
-        except (OSError, ValueError, AttributeError):
-            return None
-
     async def adopt(self, host):
         await asyncio.to_thread(camera.check_model, host)
         await camera.set_time(host)
@@ -241,7 +228,6 @@ class CameraState:
             await asyncio.sleep(0.5)
             steps = await self.read_steps(host)
         position = Sample.now(steps)
-        self.calibration = await asyncio.to_thread(self.read_calibration, host)
         self.position = position
         self.host = host
         await asyncio.to_thread(self.save_host, host)
@@ -270,9 +256,9 @@ class CameraState:
                 poll.cancel()
             await asyncio.gather(*polls, return_exceptions=True)
             await controller.cancel_camera(host)
+            controller.forget_directions(host)
             self.position = None
             self.samples.clear()
-            self.calibration = None
             self.host = None
 
     async def run(self, controller):

@@ -12,6 +12,8 @@ HTTP_PORT = 10081
 TIMEOUT = 1
 MAX_JPEG = 1024 * 1024
 SUBSTREAM = bytes.fromhex("494e4603000100010000001804030500") + bytes(20)
+SPEAKER_START = bytes.fromhex("494e4607000100010000001800020100") + bytes(20)
+SPEAKER_FRAME_SAMPLES = 320
 
 
 class CameraError(Exception):
@@ -65,6 +67,38 @@ async def environment(host):
     async with login(host) as (reader, writer):
         writer.write(hank_environment.GET_PACKET)
         return hank_environment._decode(*await read_frame(reader))
+
+
+@asynccontextmanager
+async def speaker(host):
+    async with login(host) as (reader, writer):
+        try:
+            writer.write(SPEAKER_START)
+            command, body = await read_frame(reader)
+            if (command != 8 or len(body) != 24 or body[1:3] != b"\x02\x01"
+                    or body[20:22] != b"\x00\x00"):
+                raise CameraError("speaker start rejected")
+            yield writer
+        except asyncio.CancelledError:
+            writer.transport.abort()
+            raise
+        finally:
+            writer.close()
+            try:
+                async with asyncio.timeout(TIMEOUT):
+                    await writer.wait_closed()
+            except (TimeoutError, asyncio.CancelledError):
+                writer.transport.abort()
+                raise
+
+
+async def send_speaker_frame(writer, payload, sequence):
+    metadata = bytes.fromhex("d30201001f400010") + struct.pack(
+        ">IIII", sequence, len(payload), (sequence - 1) * 40, 0)
+    header = bytes.fromhex("494e460400010001") + struct.pack(">I", len(metadata) + len(payload))
+    writer.write(header + metadata + payload)
+    async with asyncio.timeout(TIMEOUT):
+        await writer.drain()
 
 
 async def motor(host, direction, can_send=None):

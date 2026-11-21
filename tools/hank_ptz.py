@@ -65,10 +65,10 @@ def _validate(host, port, timeout):
         raise ValueError("Timeout must be greater than zero and at most 3 seconds")
 
 
-def stop(host: str = "192.168.0.123", *, port: int = 90, timeout: float = 1.0) -> dict:
+def stop(host: str = "192.168.0.123", *, port: int = 90, timeout: float = 1.0, before_send=None) -> dict:
     """Send H (stop) on a fresh connection and require its protocol ACK."""
     _validate(host, port, timeout)
-    return _request(host, "H", port=port, timeout=timeout)
+    return _request(host, "H", port=port, timeout=timeout, before_send=before_send)
 
 
 def move(
@@ -173,6 +173,11 @@ def pulse(direction, *, host='192.168.0.123', port=90, timeout=1.0,
     if cancelled():
         raise PTZError('movement interrupted by stop')
     stop(host, port=port, timeout=timeout)
+    stop_sent_at = []
+
+    def record_stop(sent_at):
+        stop_sent_at.append(sent_at)
+
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -186,6 +191,7 @@ def pulse(direction, *, host='192.168.0.123', port=90, timeout=1.0,
             try:
                 if cancelled():
                     raise PTZError('movement interrupted by stop')
+                move_sent_at = time.monotonic()
                 sock.sendall(_packet(direction, 1))
                 deadline = time.monotonic() + duration
                 while time.monotonic() < deadline:
@@ -193,17 +199,24 @@ def pulse(direction, *, host='192.168.0.123', port=90, timeout=1.0,
                         raise PTZError('movement interrupted by stop')
                     time.sleep(min(.02, max(0, deadline-time.monotonic())))
             finally:
+                stop_started_at = time.monotonic()
                 try:
-                    stop(host, port=port, timeout=timeout)
+                    stop(host, port=port, timeout=timeout, before_send=record_stop)
                 except Exception:
-                    stop(host, port=port, timeout=timeout)
+                    stop(host, port=port, timeout=timeout, before_send=record_stop)
+                stop_ack_at = time.monotonic()
             command, body = _receive_frame(sock, time.monotonic()+timeout, timeout)
             if command != 16 or body != bytes(4):
                 raise PTZError('Unexpected PTZ acknowledgement')
     except (OSError, CaptureError, _DeadlineReached) as exc:
         raise PTZError(f'PTZ pulse transport failed: {type(exc).__name__}') from exc
     return {'direction': direction, 'duration': duration, 'acknowledged': True,
-            'stop_acknowledged': True}
+            'stop_acknowledged': True,
+            'wait_seconds': stop_started_at - move_sent_at,
+            'stop_setup_seconds': stop_sent_at[0] - stop_started_at,
+            'send_interval_seconds': stop_sent_at[0] - move_sent_at,
+            'stop_ack_seconds': stop_ack_at - move_sent_at,
+            'stop_sends': len(stop_sent_at)}
 
 
 if __name__ == "__main__":

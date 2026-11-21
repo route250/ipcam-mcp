@@ -3,25 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LANカメラ</title>
+<title>カメラ操作</title>
 <style>
   :root { color-scheme: dark; --bg:#101417; --panel:#1a2126; --line:#36454c; --ink:#f2f5f4; --muted:#b4c0c4; --accent:#a8e8d1; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
-  main { width:min(100% - 32px, 924px); margin:36px auto; }
-  header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
-  h1 { margin:0; font-size:24px; }
-  h2 { margin:0; font-size:15px; }
+  main { width:min(100% - 32px, 1200px); margin:clamp(16px, 3vw, 36px) auto; }
+  .control-heading { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:4px 12px; }
+  h2 { margin:0; font-size:16px; }
   #connection { color:var(--accent); font-size:14px; }
-  .layout { display:grid; grid-template-columns:minmax(0, 640px) minmax(214px, 1fr); gap:16px; align-items:start; }
+  .layout { display:grid; grid-template-columns:minmax(0, 1fr); gap:16px; align-items:start; }
   figure { margin:0; width:100%; aspect-ratio:16/9; position:relative; display:grid; place-items:center; background:#070a0c; border-radius:12px; overflow:hidden; }
   figure img { position:absolute; width:100%; height:100%; object-fit:contain; }
   [hidden] { display:none !important; }
   #placeholder { color:var(--muted); padding:12px; }
   section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
-  .side { display:grid; gap:12px; }
-  #pad { position:relative; display:grid; place-items:center; width:150px; aspect-ratio:1; margin:16px auto 8px; background:#283238; border:1px solid #66767d; color:var(--ink); border-radius:50%; touch-action:none; user-select:none; cursor:grab; font:inherit; }
-  #pad:disabled { opacity:.5; cursor:default; }
+  .controls { display:grid; grid-template-columns:minmax(0, 1fr); gap:16px; }
+  #pad { position:relative; display:grid; place-items:center; width:min(144px, 100%); aspect-ratio:1; margin:12px auto 4px; background:#283238; border:1px solid #66767d; color:var(--ink); border-radius:50%; touch-action:none; user-select:none; cursor:grab; font:inherit; }
+  :is(#pad, #homing, #goto):disabled { opacity:.5; cursor:default; }
   #pad:active { cursor:grabbing; }
   #pad:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
   #pad span { position:absolute; pointer-events:none; }
@@ -32,75 +31,192 @@
   #pad [data-dir="center"] { width:20%; height:20%; border:1px solid #94a5aa; border-radius:50%; }
   #pad[data-direction="up"] [data-dir="up"], #pad[data-direction="down"] [data-dir="down"],
   #pad[data-direction="left"] [data-dir="left"], #pad[data-direction="right"] [data-dir="right"] { color:var(--accent); transform:scale(1.25); }
-  #motion { margin:0; color:var(--muted); font-size:13px; min-height:1.5em; text-align:center; }
-  dl { display:grid; grid-template-columns:auto 1fr; column-gap:12px; row-gap:6px; margin:12px 0 0; font-size:14px; }
-  dt { color:var(--muted); }
-  dd { margin:0; text-align:right; font-variant-numeric:tabular-nums; }
-  @media (max-width:700px) { main { margin:20px auto; } .layout { grid-template-columns:1fr; } .side { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-  @media (max-width:420px) { .side { grid-template-columns:1fr; } }
+  #motion, .result { margin:0; color:var(--muted); font-size:13px; }
+  #motion { min-height:1.5em; text-align:center; }
+  .result:not(:empty) { margin-block-start:8px; }
+  #target-form { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-block-start:12px; }
+  #target-form label { display:grid; gap:4px; color:var(--muted); font-size:14px; }
+  .unit-field, #goto { grid-column:1 / -1; }
+  #target-form .unit-field { grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); align-items:center; gap:12px; }
+  :is(#homing, #target-form input, #target-form select, #goto) {
+    width:100%; min-width:0; min-height:44px; padding:8px 12px;
+    color:var(--ink); background:#283238; border:1px solid #66767d; border-radius:8px; font:inherit; font-size:14px;
+  }
+  :is(#homing, #goto) { cursor:pointer; }
+  #homing { margin-block-start:12px; }
+  #goto { color:var(--accent); background:#203832; border-color:#63897d; }
+  :is(#homing, #goto):enabled:hover { background:#36464a; }
+  :is(#homing, #target-form input, #target-form select, #goto):focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .metrics { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; margin:0; }
+  .metrics dt { color:var(--muted); font-size:13px; }
+  .metrics dd { margin:2px 0 0; font-size:18px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+  .metrics :is(small, .steps) { color:var(--muted); font-size:12px; }
+  @media (min-width:36rem) {
+    .metrics { grid-template-columns:repeat(4, minmax(0, 1fr)); }
+  }
+  @media (42rem <= width < 54rem) {
+    .controls { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  }
+  @media (min-width:54rem) {
+    .layout { grid-template-columns:minmax(0, 1fr) 320px; column-gap:20px; grid-template-rows:auto 1fr; }
+    .controls { grid-column:2; grid-row:1 / 3; }
+    .camera-info { grid-column:1; grid-row:2; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <header><h1>LANカメラ</h1><span id="connection" role="status">カメラを確認中</span></header>
   <div class="layout">
     <figure>
       <span id="placeholder">映像を待機中</span>
       <img id="video" width="640" height="360" alt="カメラのライブ映像" hidden>
     </figure>
-    <div class="side">
+    <div class="controls">
       <section aria-labelledby="control-title">
-        <h2 id="control-title">パン・チルト</h2>
+        <div class="control-heading">
+          <h2 id="control-title">手動操作</h2>
+          <span id="connection" role="status">カメラを確認中</span>
+        </div>
         <button id="pad" type="button" aria-label="方向パッド。ドラッグまたは矢印キーで操作" disabled>
           <span data-dir="up" aria-hidden="true">▲</span><span data-dir="down" aria-hidden="true">▼</span>
           <span data-dir="left" aria-hidden="true">◀</span><span data-dir="right" aria-hidden="true">▶</span>
           <span data-dir="center" aria-hidden="true"></span>
         </button>
         <p id="motion" role="status">停止中</p>
+        <button id="homing" type="button" disabled>原点復帰</button>
+        <p id="homing-result" class="result" role="status"></p>
       </section>
-      <section aria-labelledby="measure-title">
-        <h2 id="measure-title">カメラ情報</h2>
-        <dl>
-          <dt>パン（推定）</dt><dd id="pan">取得不可</dd>
-          <dt>パンのステップ値</dt><dd id="pan-steps">取得不可</dd>
-          <dt>チルト（推定）</dt><dd id="tilt">取得不可</dd>
-          <dt>チルトのステップ値</dt><dd id="tilt-steps">取得不可</dd>
-          <dt>温度</dt><dd id="temperature">取得不可</dd>
-          <dt>相対湿度</dt><dd id="humidity">取得不可</dd>
-        </dl>
+      <section aria-labelledby="target-title">
+        <h2 id="target-title">位置指定</h2>
+        <form id="target-form" aria-labelledby="target-title">
+          <label class="unit-field">指定単位<select id="target-unit">
+            <option value="steps">ステップ</option>
+            <option value="degrees">度</option>
+          </select></label>
+          <label>パン<input id="target-pan" type="number" min="0" max="4100" step="1"></label>
+          <label>チルト<input id="target-tilt" type="number" min="0" max="1140" step="1"></label>
+          <button id="goto" type="submit" disabled>指定位置へ移動</button>
+        </form>
+        <p id="goto-result" class="result" role="status"></p>
       </section>
     </div>
+    <section class="camera-info" aria-label="位置と温湿度">
+      <dl class="metrics">
+        <div>
+          <dt>パン <small>角度は推定</small></dt>
+          <dd id="pan">取得不可</dd>
+          <dd id="pan-steps" class="steps">ステップ取得不可</dd>
+        </div>
+        <div>
+          <dt>チルト <small>角度は推定</small></dt>
+          <dd id="tilt">取得不可</dd>
+          <dd id="tilt-steps" class="steps">ステップ取得不可</dd>
+        </div>
+        <div><dt>温度</dt><dd id="temperature">取得不可</dd></div>
+        <div><dt>相対湿度</dt><dd id="humidity">取得不可</dd></div>
+      </dl>
+    </section>
   </div>
 </main>
 <script>
   "use strict";
   const $ = id => document.getElementById(id);
-  const video = $("video"), placeholder = $("placeholder"), pad = $("pad");
+  const video = $("video"), placeholder = $("placeholder"), pad = $("pad"), homing = $("homing");
+  const unit = $("target-unit"), pan = $("target-pan"), tilt = $("target-tilt"), go = $("goto");
   const cameraLabels = {discovering:"カメラを探索中", connecting:"映像に接続中", ready:"配信中"};
-  const motionLabels = {idle:"停止中", manual:"手動移動中", goto:"角度指定で移動中", stopping:"停止処理中", stop_unconfirmed:"停止を確認できません"};
+  const motionLabels = {idle:"停止中", manual:"手動移動中", goto:"指定位置へ移動中", stopping:"停止処理中",
+    stop_unconfirmed:"停止を確認できません", homing:"原点復帰中", homing_unconfirmed:"原点復帰の完了を確認できません"};
   const errors = {busy:"ほかの操作が実行中です", camera_unavailable:"カメラに接続できません",
     motion_failed:"操作を終了しました。パッドを離してください", stop_unconfirmed:"停止を確認できません"};
   const keys = {ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right"};
   let ws, pointer = null, key = null, direction = null, cameraReady = false;
+  let motion = "idle", homingPending = false, gotoPending = false;
 
-  function refreshPad() {
-    pad.disabled = !(cameraReady && ws?.readyState === WebSocket.OPEN);
+  function refreshControls() {
+    const connected = cameraReady && ws?.readyState === WebSocket.OPEN;
+    const pending = homingPending || gotoPending;
+    pad.disabled = !connected || pending ||
+      ["goto", "homing", "homing_unconfirmed", "stopping", "stop_unconfirmed"].includes(motion);
+    homing.disabled = !connected || pending || motion !== "idle";
+    go.disabled = homing.disabled || (pan.value === "" && tilt.value === "");
     if (pad.disabled) release();
+  }
+  function showMotion(state) {
+    motion = state;
+    $("motion").textContent = motionLabels[state];
+    refreshControls();
   }
   function openControl() {
     ws = new WebSocket("ws://" + location.host + "/api/ptz");
-    ws.onopen = refreshPad;
-    ws.onclose = () => { refreshPad(); setTimeout(openControl, 1000); };
+    ws.onopen = refreshControls;
+    ws.onclose = () => {
+      if (homingPending) $("homing-result").textContent = "接続が切れました。再接続後の状態を確認してください。";
+      if (gotoPending) $("goto-result").textContent = "接続が切れました。停止後の位置を確認してください。";
+      homingPending = false;
+      gotoPending = false;
+      refreshControls();
+      setTimeout(openControl, 1000);
+    };
     ws.onmessage = ({data}) => {
       const event = JSON.parse(data);
-      if (event.ok === false) $("motion").textContent = errors[event.code] ?? event.message;
-      else if (event.ptz_state) $("motion").textContent = motionLabels[event.ptz_state];
+      if (event.type === "goto_result") {
+        gotoPending = false;
+        const messages = {motion_failed:"指定位置に到達できませんでした。現在の位置を確認してください。",
+          position_unavailable:"現在のステップ値を取得できませんでした。"};
+        $("goto-result").textContent = event.ok
+          ? `指定位置に到達しました（許容差 ${event.tolerance_steps} ステップ）。`
+          : messages[event.code] ?? errors[event.code] ?? event.message;
+        refreshControls();
+      } else if (event.type === "homing_result") {
+        homingPending = false;
+        const messages = {position_unavailable:"位置を取得できません。方向パッドで短く動かしてから再試行してください。",
+          motion_failed:"原点復帰要求を送信できませんでした。",
+          position_refresh_failed:"原点復帰は完了しましたが、ステップ値を再取得できませんでした。",
+          homing_unconfirmed:"30秒以内に完了を確認できませんでした。実機の停止を確認してからサーバーを再起動してください。"};
+        $("homing-result").textContent = event.ok
+          ? "原点復帰完了。ステップ値を更新しました。"
+          : messages[event.code] ?? errors[event.code] ?? event.message;
+        refreshControls();
+      } else if (event.ok === false) $("motion").textContent = errors[event.code] ?? event.message;
+      else if (event.ptz_state) showMotion(event.ptz_state);
     };
   }
   function send(type) {
     if (ws?.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify(type === "drive" ? {type, direction} : {type}));
   }
+  homing.onclick = () => {
+    if (homing.disabled) return;
+    homingPending = true;
+    $("homing-result").textContent = "";
+    send("homing");
+    refreshControls();
+  };
+  unit.onchange = () => {
+    const steps = unit.value === "steps";
+    for (const [field, min, max] of [[pan, steps ? 0 : -177.5, steps ? 4100 : 177.5],
+                                      [tilt, steps ? 0 : -30, steps ? 1140 : 90]]) {
+      field.value = "";
+      field.min = min;
+      field.max = max;
+      field.step = steps ? "1" : "any";
+    }
+    refreshControls();
+  };
+  pan.oninput = tilt.oninput = refreshControls;
+  $("target-form").onsubmit = event => {
+    event.preventDefault();
+    if (go.disabled) return;
+    const steps = unit.value === "steps";
+    const payload = {type: steps ? "goto_steps" : "goto"};
+    for (const [axis, field] of [["pan", pan], ["tilt", tilt]]) {
+      if (field.value !== "") payload[axis + "_" + unit.value] = field.valueAsNumber;
+    }
+    gotoPending = true;
+    $("goto-result").textContent = "";
+    ws.send(JSON.stringify(payload));
+    refreshControls();
+  };
   function aim(next) {
     if (direction === next) return;
     direction = next;
@@ -168,12 +284,11 @@
       $("connection").textContent = cameraLabels[status.state];
       cameraReady = status.frame !== null;
       showFeed(cameraReady);
-      $("motion").textContent = motionLabels[status.ptz_state];
-      const absent = status.position.status === "uncalibrated" ? "未校正" : "取得不可";
-      showNumber("pan", status.position.pan_degrees, "°", absent);
-      showNumber("tilt", status.position.tilt_degrees, "°", absent);
-      showNumber("pan-steps", status.position.pan_steps, " ステップ", "取得不可", 0);
-      showNumber("tilt-steps", status.position.tilt_steps, " ステップ", "取得不可", 0);
+      showMotion(status.ptz_state);
+      showNumber("pan", status.position.pan_degrees, "°");
+      showNumber("tilt", status.position.tilt_degrees, "°");
+      showNumber("pan-steps", status.position.pan_steps, " ステップ", "ステップ取得不可", 0);
+      showNumber("tilt-steps", status.position.tilt_steps, " ステップ", "ステップ取得不可", 0);
       showNumber("temperature", status.environment.temperature_c, " ℃");
       showNumber("humidity", status.environment.relative_humidity_percent, " %RH");
     } catch {
@@ -181,7 +296,7 @@
       showFeed(false);
       $("connection").textContent = "サーバーに再接続中";
     } finally {
-      refreshPad();
+      refreshControls();
       setTimeout(poll, 1000);
     }
   }
