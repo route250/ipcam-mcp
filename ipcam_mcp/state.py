@@ -15,6 +15,7 @@ import time
 from tinytuya.core import decrypt_udp
 from tools import camera_info, hank_environment, hank_ptz, ipcam_angles
 from . import camera
+from .mic import Microphone
 
 LOG = logging.getLogger(__name__)
 PRIVATE_NETWORKS = tuple(map(IPv4Network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
@@ -109,6 +110,7 @@ class CameraState:
         self.frame = None
         self.frame_id = 0
         self.frame_changed = asyncio.Event()
+        self.microphone = Microphone()
         self.ptz_state = "idle"
         self.position_lock = asyncio.Lock()
         self.position_recovery_attempted = set()
@@ -241,12 +243,13 @@ class CameraState:
             while failures < 3:
                 previous_frame = self.frame_id
                 try:
-                    await camera.stream(host, self.publish)
+                    await camera.stream(host, self.publish, self.microphone.publish)
                 except (ExceptionGroup, *READ_ERRORS) as error:
                     detail = error.exceptions[0] if isinstance(error, ExceptionGroup) else error
                     LOG.warning("Video disconnected from %s: %s", host, detail)
                 finally:
                     self.clear_frame()
+                    self.microphone.reset()
                     controller.stop_manual_for_video()
                 failures = 0 if self.frame_id != previous_frame else failures + 1
                 if failures < 3:

@@ -1,42 +1,13 @@
-"""Encode PCM and pace camera audio on a dedicated sender thread."""
+"""Pace camera audio on a dedicated sender thread."""
 
 import asyncio
-from bisect import bisect_right
 from collections import deque
-import struct
 
 from . import camera
+from .audio_codec import RATE
 
-RATE = 8000
 FRAME_SAMPLES = camera.SPEAKER_FRAME_SAMPLES
 FRAME_SECONDS = FRAME_SAMPLES / RATE
-
-
-def decode_mulaw(code):
-    value = code ^ 255
-    magnitude = (((value & 15) << 3) + 132) << ((value >> 4) & 7)
-    return 132 - magnitude if value & 128 else magnitude - 132
-
-
-def make_mulaw_table():
-    # Use the same quantization as the verified speaker client.
-    thresholds = [(decode_mulaw(index ^ 255) + decode_mulaw((index + 1) ^ 255) + 4) >> 3
-                  for index in range(127)]
-    table = bytearray(16384)
-    table[8192] = 255
-    for magnitude in range(1, 8192):
-        code = bisect_right(thresholds, magnitude)
-        table[8192 + magnitude] = code ^ 255
-        table[8192 - magnitude] = code ^ 127
-    table[0] = table[1]
-    return bytes(table)
-
-
-MULAW = make_mulaw_table()
-
-
-def encode_mulaw(pcm):
-    return bytes(MULAW[(sample + 32768) >> 2] for (sample,) in struct.iter_unpack("<h", pcm))
 
 
 async def wait_until(deadline):

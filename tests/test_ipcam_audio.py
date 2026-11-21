@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from ipcam_mcp.app import create_app
 from ipcam_mcp import camera
-from ipcam_mcp.audio_sender import encode_mulaw
+from ipcam_mcp.audio_codec import encode_mulaw
 from tools.hank_camera import PACKET1
 
 

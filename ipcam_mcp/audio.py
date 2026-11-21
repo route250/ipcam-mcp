@@ -14,7 +14,8 @@ from starlette.requests import ClientDisconnect
 from starlette.responses import StreamingResponse
 
 from . import camera
-from .audio_sender import RATE, encode_mulaw, send_in_worker
+from .audio_codec import RATE, encode_mulaw
+from .audio_sender import send_in_worker
 
 MAX_SAMPLES = 60 * RATE
 MAX_JOBS = 32

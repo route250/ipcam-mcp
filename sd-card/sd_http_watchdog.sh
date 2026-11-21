@@ -5,9 +5,10 @@ set -eu
 BB=/bin/busybox
 WORK=/tmp/ipcam-sd-wifi
 ROOT="$WORK/http"
-mkdir -p "$ROOT"
-ln -sf /mnt/flash/data/device_model.txt "$ROOT/device_model.txt"
-ln -sf /mnt/flash/data/motorPosition "$ROOT/motorPosition"
+"$BB" mkdir -p "$ROOT"
+for name in device_model.txt motorPosition Version.txt SysInfo; do
+    "$BB" ln -sf "/mnt/flash/data/$name" "$ROOT/$name"
+done
 
 pid=
 address=

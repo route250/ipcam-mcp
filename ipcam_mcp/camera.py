@@ -14,6 +14,8 @@ MAX_JPEG = 1024 * 1024
 SUBSTREAM = bytes.fromhex("494e4603000100010000001804030500") + bytes(20)
 SPEAKER_START = bytes.fromhex("494e4607000100010000001800020100") + bytes(20)
 SPEAKER_FRAME_SAMPLES = 320
+MIC_FRAME_PREFIX = bytes.fromhex("d30201011f400010")
+MIC_FRAME_BYTES = 320
 
 
 class CameraError(Exception):
@@ -118,27 +120,30 @@ async def motor_ack(reader):
         raise CameraError("invalid PTZ acknowledgement")
 
 
-def video_payload(command, body):
+def media_payload(command, body):
     if command not in (4, 6) or len(body) < 24:
         raise CameraError("invalid media frame")
     payload = body[24:]
     if int.from_bytes(body[12:16], "big") != len(payload):
         raise CameraError("invalid media payload length")
-    if command == 4:
-        return None
-    if (body[0] not in (0xD1, 0xD2) or body[1:4] != bytes.fromhex("01050f")
+    if command == 6 and (
+            body[0] not in (0xD1, 0xD2) or body[1:4] != bytes.fromhex("01050f")
             or struct.unpack(">HH", body[4:8]) != (640, 360)
             or not payload.startswith((b"\x00\x00\x01", b"\x00\x00\x00\x01"))):
         raise CameraError("invalid H.264 substream frame")
     return payload
 
 
-async def feed_video(reader, destination):
+async def feed_media(reader, destination, publish_audio):
     while True:
-        payload = video_payload(*await read_frame(reader, 5))
-        if payload is not None:
+        command, body = await read_frame(reader, 5)
+        payload = media_payload(command, body)
+        if command == 6:
             destination.write(payload)
             await destination.drain()
+        elif (len(payload) == MIC_FRAME_BYTES and body[:8] == MIC_FRAME_PREFIX
+              and body[20:24] == b"\0" * 4):
+            publish_audio(body[8:12], payload)
 
 
 async def publish_jpegs(reader, publish):
@@ -162,7 +167,7 @@ async def publish_jpegs(reader, publish):
         publish(jpeg)
 
 
-async def stream(host, publish):
+async def stream(host, publish, publish_audio):
     async with login(host) as (reader, writer):
         decoder = await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-loglevel", "error", "-threads", "1",
@@ -175,7 +180,7 @@ async def stream(host, publish):
         try:
             writer.write(SUBSTREAM)
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(feed_video(reader, decoder.stdin))
+                tasks.create_task(feed_media(reader, decoder.stdin, publish_audio))
                 tasks.create_task(publish_jpegs(decoder.stdout, publish))
         finally:
             decoder.stdin.close()

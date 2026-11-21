@@ -12,16 +12,37 @@ SD側のDHCP処理はIPv4アドレスとネットマスクだけを適用する�
 
 以下の `SD` はUbuntu上のSDカードのマウント先に置き換えるワン。
 既存の `update_script.sh` がある場合は、作業前にカードの内容をバックアップするワン。
-`--probe-ip` には同じLANでpingに応答する機器のIPv4を指定するワン。
+初回の準備では、Ubuntuの `gcc-arm-none-eabi` に含まれるクロスコンパイラを使って起動用ヘルパーを作るワン。
 
 ```sh
 SD=/media/"$USER"/IPCAM
-cp -i sd-card/update_script.sh sd-card/sd_wifi_boot.sh sd-card/sd_http_watchdog.sh "$SD/"
-python3 sd-card/configure.py "$SD" --ssid '自宅のSSID' --probe-ip 192.168.1.1
+arm-none-eabi-gcc -Os -marm -march=armv7-a -ffreestanding -static -nostdlib \
+  -Wl,-e,_start,-Ttext=0x20000,-z,max-page-size=4096 \
+  -o "$SD/ipcam-wifi-launch" sd-card/ipcam-wifi-launch.c
+cp -i sd-card/*.sh "$SD/"
+python3 sd-card/configure.py "$SD" --ssid 'リビングのSSID' --ssid '作業部屋のSSID' \
+  --probe-ip 192.168.1.1 --probe-ip 192.168.1.10 --lan-cidr 192.168.1.0/24
 sync
 ```
 
-生成した `wpa_supplicant.conf` には、Wi-Fi接続に使えるPSKが入るワン。
+`--ssid` は接続先ごとに指定し、表示された順に各SSIDのパスフレーズを入力するワン。
+コマンドは指定したSSID一式で `wpa_supplicant.conf` を作り直すワン。
+カメラは登録先を同じ優先度で扱い、起動時に電波強度やセキュリティ方式に基づいて接続先を選ぶワン。
+生成した `wpa_supplicant.conf` には、SSIDごとの `network={...}` と接続に使えるPSKが入るワン。
+Telnetで設定を追加する場合は、SDの `/mnt/flash/mmc/wpa_supplicant.conf` に `network={...}` ブロックを追加するワン。
+
+疎通確認先はSD直下の `lan-probe-ip` にIPv4アドレスを1行に1件書くワン。
+`--probe-ip` で複数指定でき、各Wi-Fiからリスト内の少なくとも1件がpingに応答する必要があるワン。
+DHCPの接続先を特定のIPv4ネットワークに制限する場合は、`--lan-cidr` でSD直下の `lan-cidr` を作るワン。
+この制限を解除する場合は、`lan-cidr` を削除するワン。
+
+既存カードから移行する場合は、機器固有のTelnet起動処理を `ipcam-telnet-local.sh` としてSD直下に置くワン。
+`WifiInfo.ipcam-dummy` を使うカードでは、起動時にRAM上へコピーして一時適用するワン。
+その状態で疎通確認に失敗すると、`ipcam-wifiinfo.disabled` を作り、純正APを待つ方式で再起動するワン。
+
+SDの起動スクリプトはカメラのタイムゾーンを日本時間（`JST-9`、UTC+9）に設定するワン。
+5秒間隔で `/tmp/TZ` を確認し、純正アプリが上書きした場合は設定し直すワン。
+
 SDカードをカメラに挿して起動し、ルーターのDHCP割り当て一覧でカメラのIPを確認するワン。
 以下は割り当てられたアドレスが `192.168.1.123` の例ワン。
 
@@ -29,7 +50,7 @@ SDカードをカメラに挿して起動し、ルーターのDHCP割り当て�
 curl --fail http://192.168.1.123:10081/device_model.txt
 ```
 
-カメラのTCP 10081は、サーバーが読む機種情報とモーター位置を配信するワン。
+カメラのTCP 10081は、Wi-FiのIPv4アドレスで `device_model.txt`、`motorPosition`、`Version.txt`、`SysInfo` の4ファイルを配信するワン。
 工場初期化直後など、カメラが位置を保存するまでは `/motorPosition` がHTTP 404を返すことがあるワン。
 HTTP版は接続確認時の404に対し、短い上下移動を各1回試して再取得するため、起動前に可動範囲を空けるワン。
 SDの起動処理が失敗した場合は、電源を切ってSDカードを取り外し、起動し直せるワン。
@@ -93,6 +114,25 @@ python3 tools/play_wav.py --server http://127.0.0.1:9928 speech.wav
 
 CLIは最長60秒のWAVをFFmpegで変換し、サーバーの終了通知を待つワン。
 Ctrl+CでCLIを終了するとSSE接続が切れ、サーバーが再生を中止するワン。
+
+## マイク録音
+
+サーバーの起動後、カメラのマイク音声を5秒間WAVに保存するワン。
+
+```sh
+.venv/bin/python tools/record_mic.py --server http://127.0.0.1:9928 --seconds 5 mic.wav
+```
+
+CLIは `/mic` のWebSocketを購読するワン。WAVは8 kHz・16 bit・モノラルで保存するワン。
+受信の途中で切断した場合は受信済みの音声をWAVに残し、エラーを返すワン。
+
+ノイズ除去を使う場合は、無音時のマイクを録音した8 kHz・16 bit・モノラルのWAVを、サーバー設定ファイルと同じディレクトリの `mic-noise-profile.wav` に置いてからサーバーを起動するワン。
+別の場所に置く場合は、サーバー起動時に `--mic-noise-profile` で指定できるワン。
+CLIの `--denoise` はノイズ除去あり、`--no-denoise` と指定省略時はノイズ除去なしワン。
+
+```sh
+.venv/bin/python tools/record_mic.py --denoise --seconds 5 filtered.wav
+```
 
 ## 自動テスト
 

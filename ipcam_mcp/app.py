@@ -201,8 +201,10 @@ async def handle_ptz(websocket, controller):
         await asyncio.gather(sender, return_exceptions=True)
 
 
-def create_app(settings, *, allowed_hosts=None):
+def create_app(settings, *, allowed_hosts=None, mic_noise_profile=None):
     state = CameraState(settings)
+    if mic_noise_profile is not None:
+        state.microphone.noise_profile = mic_noise_profile
     controller = Controller(state)
     audio = Audio(state)
     mcp = mcp_app(state, controller, allowed_hosts)
@@ -243,5 +245,9 @@ def create_app(settings, *, allowed_hosts=None):
     @app.websocket("/api/ptz")
     async def ptz(websocket: WebSocket):
         await handle_ptz(websocket, controller)
+
+    @app.websocket("/mic")
+    async def mic(websocket: WebSocket, denoise: bool = False):
+        await state.microphone.subscribe(websocket, denoise=denoise)
 
     return app
