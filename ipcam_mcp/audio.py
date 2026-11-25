@@ -1,4 +1,4 @@
-"""Session-based PCM playback with server-timed SSE notifications."""
+"""Session-based PCM and speech playback with server-timed SSE notifications."""
 
 import asyncio
 from collections import deque
@@ -16,10 +16,12 @@ from starlette.responses import StreamingResponse
 from . import camera
 from .audio_codec import RATE, encode_mulaw
 from .audio_sender import send_in_worker
+from .tts import split_speech, synthesize
 
 MAX_SAMPLES = 60 * RATE
 MAX_JOBS = 32
 MAX_INDEXES = 128
+MAX_TEXT_BYTES = 8192
 AUDIO_ERRORS = (OSError, EOFError, TimeoutError, camera.CameraError)
 LOG = logging.getLogger(__name__)
 
@@ -27,14 +29,16 @@ LOG = logging.getLogger(__name__)
 @dataclass
 class Job:
     id: int
-    payload: bytes
+    payload: bytes | None
     indexes: deque[int]
+    text: str | None = None
+    payload_start: int = 0
     offset: int = 0
     started: bool = False
 
     @property
     def length(self):
-        return len(self.payload)
+        return None if self.payload is None else self.payload_start + len(self.payload)
 
 
 class Session:
@@ -45,6 +49,7 @@ class Session:
         self.changed = asyncio.Event()
         self.pending = deque()
         self.active = None
+        self.operation = None
         self.segment = None
         self.paused = False
         self.closed = False
@@ -56,8 +61,8 @@ class Session:
         self.sender = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-audio-send")
         self.worker = asyncio.create_task(self.run())
 
-    def enqueue(self, payload, indexes):
-        job = Job(self.next_id, payload, deque(indexes))
+    def enqueue(self, payload, indexes, *, text=None):
+        job = Job(self.next_id, payload, deque(indexes), text=text)
         self.next_id += 1
         self.outstanding += 1
         self.pending.append(job)
@@ -77,13 +82,17 @@ class Session:
             self.active = None
         while self.pending:
             self.finish(self.pending.popleft(), "cancelled")
-        return self.interrupt()
+        return self.interrupt(self.operation)
 
-    def interrupt(self):
-        segment = self.segment
-        if segment is not None and not segment.done() and not segment.cancelling():
-            segment.cancel()
-        return segment
+    @staticmethod
+    def interrupt(task):
+        if task is not None and not task.done() and not task.cancelling():
+            task.cancel()
+        return task
+
+    def pause(self):
+        self.paused = True
+        return self.interrupt(self.segment)
 
     def close(self):
         if self.closed:
@@ -94,20 +103,22 @@ class Session:
         self.changed.set()
 
     async def run(self):
+        from_idle = True
         while not self.closed:
-            if self.paused or (self.active is None and not self.pending):
+            if self.paused or not self.pending:
+                from_idle = True
                 self.changed.clear()
                 await self.changed.wait()
                 continue
-            if self.active is None:
-                self.active = self.pending.popleft()
-            job = self.active
-            self.segment = asyncio.create_task(self.play(job))
+            job = self.active = self.pending.popleft()
+            operation = self.play_speech(job, from_idle) if job.text is not None else self.play_chunk(job)
+            self.operation = asyncio.create_task(operation)
             try:
-                reason, = await asyncio.gather(self.segment, return_exceptions=True)
+                reason, = await asyncio.gather(self.operation, return_exceptions=True)
             finally:
-                self.segment = None
-            if self.active is not job or isinstance(reason, asyncio.CancelledError):
+                self.operation = None
+            from_idle = self.active is not job or not job.started
+            if self.active is not job:
                 continue
             self.active = None
             if isinstance(reason, BaseException):
@@ -115,11 +126,68 @@ class Session:
                 reason = "failed"
             self.finish(job, reason)
 
-    async def play(self, job):
-        if job.offset == job.length:
+    async def wait_resumed(self):
+        while self.paused:
+            self.changed.clear()
+            await self.changed.wait()
+
+    async def prepare(self, text, max_samples):
+        pcm = await synthesize(text, max_samples)
+        return await asyncio.to_thread(encode_mulaw, pcm)
+
+    async def play_speech(self, job, from_idle):
+        sections = split_speech(job.text, from_idle)
+        section = next(sections, None)
+        synthesis = None
+        try:
+            if section is None:
+                raise ValueError("TTS text contains no speech sections")
+            while section is not None:
+                await self.wait_resumed()
+                if synthesis is None:
+                    synthesis = asyncio.create_task(self.prepare(section, MAX_SAMPLES - job.offset))
+                payload = await asyncio.shield(synthesis)
+                synthesis = None
+                section = next(sections, None)
+                length = job.offset + len(payload)
+                if section is None and job.indexes and job.indexes[-1] > length:
+                    raise ValueError("Indexes exceed the synthesized audio length")
+                job.payload_start = job.offset
+                job.payload = payload
+                await self.wait_resumed()
+                if section is not None:
+                    synthesis = asyncio.create_task(self.prepare(section, MAX_SAMPLES - length))
+                reason = await self.play_chunk(job)
+                if reason != "completed":
+                    return reason
             return "completed"
+        except (OSError, ValueError) as error:
+            LOG.warning("Speech synthesis failed: %s", error)
+            return "failed"
+        finally:
+            if synthesis is not None:
+                self.interrupt(synthesis)
+                await asyncio.gather(synthesis, return_exceptions=True)
+
+    async def play_chunk(self, job):
+        while job.offset < job.length:
+            await self.wait_resumed()
+            segment = self.segment = asyncio.create_task(self.play(job))
+            try:
+                await asyncio.wait((segment,))
+                if not segment.cancelled():
+                    return segment.result()
+            finally:
+                if not segment.done():
+                    self.interrupt(segment)
+                    await asyncio.gather(segment, return_exceptions=True)
+                self.segment = None
+        return "completed"
+
+    async def play(self, job):
         host = self.state.host
-        if not host:
+        sample_rate = self.state.microphone.sample_rate
+        if not host or sample_rate not in camera.MIC_SAMPLE_RATES:
             return "failed"
 
         def started():
@@ -129,14 +197,15 @@ class Session:
 
         def progress(offset, reached):
             if self.active is job:
-                job.offset = offset
+                job.offset = job.payload_start + offset
                 if reached:
                     job.indexes.popleft()
-                    self.emit("index", id=job.id, index=offset)
+                    self.emit("index", id=job.id, index=job.offset)
 
         try:
-            await send_in_worker(self.sender, host, job.payload, job.offset, tuple(job.indexes),
-                                 started, progress)
+            indexes = tuple(index - job.payload_start for index in job.indexes if index <= job.length)
+            await send_in_worker(self.sender, host, job.payload, job.offset - job.payload_start, indexes,
+                                 started, progress, sample_rate=sample_rate)
         except AUDIO_ERRORS as error:
             LOG.warning("Audio playback failed: %s", error)
             return "failed"
@@ -183,6 +252,10 @@ def parse_headers(request):
     if not re.fullmatch(r"[0-9]{1,6}", length) or not 1 <= int(length) <= MAX_SAMPLES:
         raise HTTPException(400, f"X-Audio-Length must be 1 to {MAX_SAMPLES} samples")
     length = int(length)
+    return length, parse_indexes(request, length)
+
+
+def parse_indexes(request, length):
     raw = request.headers.get("x-audio-indexes", "")
     parts = raw.split(",") if raw else []
     if len(parts) > MAX_INDEXES or any(not re.fullmatch(r"[0-9]{1,6}", part) for part in parts):
@@ -190,24 +263,45 @@ def parse_headers(request):
     indexes = [int(part) for part in parts]
     if indexes != sorted(set(indexes)) or (indexes and indexes[-1] > length):
         raise HTTPException(400, "Indexes must increase strictly and be within the audio length")
-    return length, indexes
+    return indexes
 
 
-async def read_pcm(request, size):
-    pcm = bytearray()
+async def read_upload(request, limit, description, overflow):
+    body = bytearray()
     try:
         async with asyncio.timeout(15):
             async for chunk in request.stream():
-                if len(pcm) + len(chunk) > size:
-                    raise HTTPException(400, "PCM byte length does not match X-Audio-Length")
-                pcm.extend(chunk)
+                if len(body) + len(chunk) > limit:
+                    raise overflow
+                body.extend(chunk)
     except TimeoutError:
-        raise HTTPException(408, "PCM upload timed out") from None
+        raise HTTPException(408, f"{description} upload timed out") from None
     except ClientDisconnect:
-        raise HTTPException(400, "PCM upload disconnected") from None
+        raise HTTPException(400, f"{description} upload disconnected") from None
+    return bytes(body)
+
+
+async def read_pcm(request, size):
+    mismatch = HTTPException(400, "PCM byte length does not match X-Audio-Length")
+    pcm = await read_upload(request, size, "PCM", mismatch)
     if len(pcm) != size:
-        raise HTTPException(400, "PCM byte length does not match X-Audio-Length")
-    return bytes(pcm)
+        raise mismatch
+    return pcm
+
+
+async def read_text(request):
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "text/plain":
+        raise HTTPException(415, "Expected text/plain")
+    overflow = HTTPException(413, f"TTS text exceeds {MAX_TEXT_BYTES} bytes")
+    body = await read_upload(request, MAX_TEXT_BYTES, "TTS", overflow)
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "TTS text must be valid UTF-8") from None
+    if not text.strip() or "\0" in text:
+        raise HTTPException(400, "TTS text must be nonempty and contain no NUL bytes")
+    return text
 
 
 class Audio:
@@ -250,11 +344,26 @@ class Audio:
             finally:
                 session.uploads -= 1
 
+        @app.post("/tts", status_code=202)
+        async def enqueue_tts(request: Request):
+            session = self.require_session(request)
+            indexes = parse_indexes(request, MAX_SAMPLES)
+            if session.outstanding + session.uploads >= MAX_JOBS:
+                raise HTTPException(429, "Audio queue is full")
+            generation = session.generation
+            session.uploads += 1
+            try:
+                text = await read_text(request)
+                if session.closed or session.generation != generation:
+                    raise HTTPException(409, "TTS upload was cancelled")
+                return {"id": session.enqueue(None, indexes, text=text)}
+            finally:
+                session.uploads -= 1
+
         @app.post("/audio/pause", status_code=204)
         async def pause(request: Request):
             session = self.require_session(request)
-            session.paused = True
-            segment = session.interrupt()
+            segment = session.pause()
             if segment is not None:
                 await asyncio.wait((segment,))
 

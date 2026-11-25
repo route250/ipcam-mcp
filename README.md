@@ -36,8 +36,9 @@ Telnetで設定を追加する場合は、SDの `/mnt/flash/mmc/wpa_supplicant.c
 DHCPの接続先を特定のIPv4ネットワークに制限する場合は、`--lan-cidr` でSD直下の `lan-cidr` を作るワン。
 この制限を解除する場合は、`lan-cidr` を削除するワン。
 
-既存カードから移行する場合は、機器固有のTelnet起動処理を `ipcam-telnet-local.sh` としてSD直下に置くワン。
+既存カードから移行する場合は、使用中の `ipcam-telnet-local.sh` と、存在する場合は `ipcam-telnet-root.hash` を新しいSDカードの直下にコピーするワン。
 `WifiInfo.ipcam-dummy` を使うカードでは、起動時にRAM上へコピーして一時適用するワン。
+SDカードのマウント、純正の設定用AP、TuyaのLAN待ち受け（TCP 6668）を確認すると、SDのWi-Fi設定への切り替えに進むワン。
 その状態で疎通確認に失敗すると、`ipcam-wifiinfo.disabled` を作り、純正APを待つ方式で再起動するワン。
 
 SDの起動スクリプトはカメラのタイムゾーンを日本時間（`JST-9`、UTC+9）に設定するワン。
@@ -54,6 +55,26 @@ curl --fail http://192.168.1.123:10081/device_model.txt
 工場初期化直後など、カメラが位置を保存するまでは `/motorPosition` がHTTP 404を返すことがあるワン。
 HTTP版は接続確認時の404に対し、短い上下移動を各1回試して再取得するため、起動前に可動範囲を空けるワン。
 SDの起動処理が失敗した場合は、電源を切ってSDカードを取り外し、起動し直せるワン。
+
+### 作業用のTelnetログイン
+
+新しいSDカードに作業用のTelnetログインを設定する場合は、リポジトリにあるテンプレートと機器ごとのパスワードハッシュをSD直下に置くワン。
+`openssl passwd -1` は対話入力でパスワードを受け取り、対象ファームウェアで動作を確認した形式のハッシュを出力するワン。
+
+```sh
+(umask 077; set -C; openssl passwd -1 > "$SD/ipcam-telnet-root.hash") &&
+  cp -i sd-card/ipcam-telnet-local.sh.example "$SD/ipcam-telnet-local.sh"
+```
+
+このテンプレートは、カメラの起動中だけ既存Telnetサービスのroot認証を設定するワン。
+元の認証に戻すには、SD直下の `ipcam-telnet-local.sh` を外してカメラを再起動するワン。
+
+### カメラマイクの入力音量
+
+SDカードの `update_script.sh` は、起動時にカメラの `/mnt/flash/data/hank_default_parameter.ini` の `[PARAMETER_ITEM]` に `InPutVolume=5` を保存するワン。
+すでに同じ内容が保存されていれば、ファイルの書き込みを省略するワン。
+以前の音声試験でSD直下に `ipcam-audio-local.sh` を置いたカードでは、再起動前にそのファイルを退避するワン。
+再起動後は同じINIで `InPutVolume=5` を確認するワン。実際の入力ゲインは `/proc/umap/acodec` の `LGain(dB)` と `RGain(dB)` で確認できるワン。
 
 ## Ubuntuでの起動
 
@@ -72,6 +93,10 @@ cp ipcam-server.example.json .config/ipcam-server.json
 MCPクライアントの接続先は `http://127.0.0.1:9928/mcp` ワン。
 別PCから使う場合は、サーバーのLAN上のIPv4を `--host` に指定するワン。
 ホスト名でアクセスする場合は `--allowed-host` も指定するワン。
+
+動体検知と人検知の対象領域をすべて空にするには、`.config/ipcam-server.json` に `"disable_detection_regions": true` を追加してサーバーを起動するワン。
+映像の接続・再接続前にLAN経由の `INF55` でカメラに空の領域を保存するワン。
+設定を `false` にすると以降の上書きが止まり、領域を使うにはカメラ側で再設定するワン。
 
 systemdのユーザーサービスを使う場合、同梱のユニットは `~/ipcam-mcp` に配置した場合の例ワン。
 別の場所で使う場合は、ユニットの `WorkingDirectory` と `ExecStart` を変更するワン。
@@ -92,7 +117,10 @@ systemctl --user enable --now ipcam-server.service
 
 操作画面で「ステップ」または「度」を選び、パンとチルトの目標を入力するワン。
 片方を空欄にすると、その軸は開始時の位置を目標とするワン。
-MCPではステップ指定に `camera_goto_steps`、角度指定に `camera_goto` を使うワン。
+MCPの移動ツールは `camera_goto` で、目標を度で指定するワン。
+角度指定の目標はパン・チルトともに範囲内の最も近い20°刻みに丸めるワン。例えば31°は40°、9°は0°になるワン。
+角度指定では現在角度も同じ方式で丸め、丸めた目標と一致した軸は移動を省略するワン。
+MCPで実測角度への復帰などを行う場合は `round_to_20_degrees: false` を指定できるワン。
 
 サーバーは移動後のステップを読み、誤差が20ステップを超える軸を最大3回補正するワン。
 同じ軸で方向を反転する指定移動では、パンは300 ms、チルトは390 msを指令時間に足すワン。
@@ -115,18 +143,64 @@ python3 tools/play_wav.py --server http://127.0.0.1:9928 speech.wav
 CLIは最長60秒のWAVをFFmpegで変換し、サーバーの終了通知を待つワン。
 Ctrl+CでCLIを終了するとSSE接続が切れ、サーバーが再生を中止するワン。
 
+## テキストの読み上げ
+
+Web画面の「読み上げ」にテキストを入力して「カメラで読み上げ」を押すワン。
+
+同梱の `tts.sh` は日本語をOpen JTalkで合成し、FFmpegで8 kHz・モノラル・16 bit PCM WAVに変換するワン。
+Ubuntuで同梱スクリプトを使うには、FFmpegに加えて次のパッケージを入れるワン。
+
+```sh
+sudo apt install open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001
+```
+
+別のエンジンを使う場合は、サーバープロセスの環境変数 `IPCAM_TTS_COMMAND` に実行可能なスクリプトの絶対パスを設定するワン。
+スクリプトは第1引数のテキストを読み上げ、第2引数のパスにWAVを出力するワン。
+キャンセル時に子プロセスも停止するため、スクリプト内のコマンドは同じプロセスグループ内で実行するワン。
+
+`GET /audio` のSSE接続を開いたまま、受け取ったセッショントークンを使ってテキストを送るワン。
+次の例は再生位置0サンプルと800サンプル（100 ms）で通知を受け取るワン。
+
+```sh
+curl --fail http://127.0.0.1:9928/tts \
+  -H "X-Audio-Session: $token" \
+  -H 'Content-Type: text/plain; charset=utf-8' \
+  -H 'X-Audio-Indexes: 0,800' \
+  --data-binary 'カメラからのお知らせです。'
+```
+
+開始・区切り・終了の通知と一時停止・再開・キャンセルにはPCMと同じAPIを使うワン。
+[音声再生API](ipcam_mcp/SPEC.md#音声再生)
+
 ## マイク録音
 
-サーバーの起動後、カメラのマイク音声を5秒間WAVに保存するワン。
+Web画面の「入力」でマイクを選び、「マイクを再生」で音を聴けるワン。
+再生中に入力を選び直すと、その画面の再生だけが切り替わるワン。
+`.config/ipcam-server.json` の `mic_source` は初期選択とCLIで使う入力を指定し、省略時は `"camera"` でカメラ内蔵マイクを使うワン。
+Pi 4のUSBマイクを選択肢に追加するには、同じ設定ファイルに `usb_mic_device` を追加してサーバーを再起動するワン。
+
+```json
+{
+  "usb_mic_device": "plughw:CARD=Device,DEV=0"
+}
+```
+
+`usb_mic_device` はサーバー上の `arecord -L` で確認できるALSAのデバイス名ワン。
+上の例は `USB PnP Sound Device` を選び、`plughw` が機器の録音レートから8 kHzに変換するワン。
+USB入力には `arecord`（Debian系では `alsa-utils`）が必要ワン。
+systemdのユーザーサービスで運用している場合は `systemctl --user restart ipcam-server` で設定を反映するワン。
+
+サーバーで指定した既定のマイクを5秒間WAVに保存するには、サーバーの起動後に次を実行するワン。
 
 ```sh
 .venv/bin/python tools/record_mic.py --server http://127.0.0.1:9928 --seconds 5 mic.wav
 ```
 
-CLIは `/mic` のWebSocketを購読するワン。WAVは8 kHz・16 bit・モノラルで保存するワン。
+CLIは `/mic` のWebSocketを購読するワン。
+WAVはカメラ入力なら元のサンプルレート（8 kHzまたは16 kHz）、USB入力なら8 kHzで、16 bit・モノラルとして保存するワン。
 受信の途中で切断した場合は受信済みの音声をWAVに残し、エラーを返すワン。
 
-ノイズ除去を使う場合は、無音時のマイクを録音した8 kHz・16 bit・モノラルのWAVを、サーバー設定ファイルと同じディレクトリの `mic-noise-profile.wav` に置いてからサーバーを起動するワン。
+既定のマイクにノイズ除去を使う場合は、無音時のマイクを配信と同じサンプルレートで録音した16 bit・モノラルのWAVを、サーバー設定ファイルと同じディレクトリの `mic-noise-profile.wav` に置いてからサーバーを起動するワン。
 別の場所に置く場合は、サーバー起動時に `--mic-noise-profile` で指定できるワン。
 CLIの `--denoise` はノイズ除去あり、`--no-denoise` と指定省略時はノイズ除去なしワン。
 

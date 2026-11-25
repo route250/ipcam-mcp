@@ -14,7 +14,8 @@ MAX_JPEG = 1024 * 1024
 SUBSTREAM = bytes.fromhex("494e4603000100010000001804030500") + bytes(20)
 SPEAKER_START = bytes.fromhex("494e4607000100010000001800020100") + bytes(20)
 SPEAKER_FRAME_SAMPLES = 320
-MIC_FRAME_PREFIX = bytes.fromhex("d30201011f400010")
+MIC_FRAME_FORMAT = bytes.fromhex("d3020101")
+MIC_SAMPLE_RATES = (8000, 16000)
 MIC_FRAME_BYTES = 320
 
 
@@ -65,6 +66,31 @@ async def set_time(host):
             raise CameraError("invalid TimeInfo acknowledgement")
 
 
+async def read_detection_scope(host, selector):
+    async with login(host) as (reader, writer):
+        writer.write(hank_feature_packets.scope_get(selector))
+        command, body = await read_frame(reader)
+    if (command != 58 or len(body) != 76 or body[:2] != b"\x02\x16"
+            or body[2] not in (15, 18) or body[3] != 0):
+        raise CameraError("invalid detection scope response")
+    return body[2], body[4:]
+
+
+async def clear_detection_scopes(host):
+    # The camera can close the connection after a scope request.
+    for selector, detector in ((0, "MD"), (1, "PD")):
+        height, mask = await read_detection_scope(host, selector)
+        if not any(mask):
+            continue
+        async with login(host) as (reader, writer):
+            writer.write(hank_feature_packets.scope_clear(selector, height))
+            if await read_frame(reader, timeout=5) != (56, b"\x00\x00"):
+                raise CameraError(f"{detector} detection scope update rejected")
+        _, mask = await read_detection_scope(host, selector)
+        if any(mask):
+            raise CameraError(f"{detector} detection scope is not empty after update")
+
+
 async def environment(host):
     async with login(host) as (reader, writer):
         writer.write(hank_environment.GET_PACKET)
@@ -94,9 +120,10 @@ async def speaker(host):
                 raise
 
 
-async def send_speaker_frame(writer, payload, sequence):
-    metadata = bytes.fromhex("d30201001f400010") + struct.pack(
-        ">IIII", sequence, len(payload), (sequence - 1) * 40, 0)
+async def send_speaker_frame(writer, payload, sequence, *, sample_rate=8000):
+    interval_ms = SPEAKER_FRAME_SAMPLES * 1000 // sample_rate
+    metadata = bytes.fromhex("d3020100") + struct.pack(
+        ">HHIIII", sample_rate, 16, sequence, len(payload), (sequence - 1) * interval_ms, 0)
     header = bytes.fromhex("494e460400010001") + struct.pack(">I", len(metadata) + len(payload))
     writer.write(header + metadata + payload)
     async with asyncio.timeout(TIMEOUT):
@@ -141,9 +168,11 @@ async def feed_media(reader, destination, publish_audio):
         if command == 6:
             destination.write(payload)
             await destination.drain()
-        elif (len(payload) == MIC_FRAME_BYTES and body[:8] == MIC_FRAME_PREFIX
-              and body[20:24] == b"\0" * 4):
-            publish_audio(body[8:12], payload)
+        elif (len(payload) == MIC_FRAME_BYTES and body[:4] == MIC_FRAME_FORMAT
+              and body[6:8] == b"\x00\x10" and body[20:24] == b"\0" * 4):
+            sample_rate = int.from_bytes(body[4:6], "big")
+            if sample_rate in MIC_SAMPLE_RATES:
+                publish_audio(body[8:12], payload, sample_rate)
 
 
 async def publish_jpegs(reader, publish):

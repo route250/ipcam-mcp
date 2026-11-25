@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 from tempfile import NamedTemporaryFile
 import time
 
@@ -28,12 +29,30 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def camera_mac_address(host):
+    """Return the Linux ARP entry for a directly reachable camera, if available."""
+    try:
+        entries = Path("/proc/net/arp").read_text().splitlines()[1:]
+    except OSError:
+        return None
+    for entry in entries:
+        ip, kind, flags, mac, *_ = entry.split()
+        if (ip == host and kind == "0x1" and int(flags, 16) & 2
+                and mac != "00:00:00:00:00:00"
+                and re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", mac)):
+            return mac
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     lan: IPv4Network
     camera_host: str | None
     device_id: str | None
     state_path: Path
+    mic_source: str = "camera"
+    usb_mic_device: str | None = None
+    disable_detection_regions: bool = False
 
     def accepts(self, host):
         try:
@@ -46,7 +65,9 @@ class Settings:
     @classmethod
     def load(cls, path):
         data = json.loads(path.read_text())
-        if not isinstance(data, dict) or set(data) - {"lan_cidr", "camera_host", "device_id", "calibration_path"}:
+        keys = {"lan_cidr", "camera_host", "device_id", "calibration_path", "mic_source", "usb_mic_device",
+                "disable_detection_regions"}
+        if not isinstance(data, dict) or set(data) - keys:
             raise ValueError("invalid configuration keys")
         lan = IPv4Network(data["lan_cidr"])
         if not any(lan.subnet_of(network) for network in PRIVATE_NETWORKS):
@@ -54,8 +75,22 @@ class Settings:
         host, device_id = data.get("camera_host"), data.get("device_id")
         if device_id is not None and (not isinstance(device_id, str) or not device_id.strip()):
             raise ValueError("device_id must be a nonempty string")
+        mic_source = data.get("mic_source", "camera")
+        usb_mic_device = data.get("usb_mic_device")
+        if mic_source not in ("camera", "usb"):
+            raise ValueError("mic_source must be camera or usb")
+        if usb_mic_device is not None and (not isinstance(usb_mic_device, str)
+                                           or not usb_mic_device.strip() or "\0" in usb_mic_device):
+            raise ValueError("usb_mic_device must be a nonempty ALSA PCM name")
+        if mic_source == "usb" and usb_mic_device is None:
+            raise ValueError("usb_mic_device is required when mic_source is usb")
+        disable_detection_regions = data.get("disable_detection_regions", False)
+        if not isinstance(disable_detection_regions, bool):
+            raise ValueError("disable_detection_regions must be a boolean")
         # Accept the old calibration_path key when loading existing setups.
-        result = cls(lan, host, device_id, path.with_name("ipcam-server-state.json"))
+        result = cls(lan, host, device_id, path.with_name("ipcam-server-state.json"),
+                     mic_source=mic_source, usb_mic_device=usb_mic_device,
+                     disable_detection_regions=disable_detection_regions)
         if host is not None and (not isinstance(host, str) or not result.accepts(host)):
             raise ValueError("camera_host must be a unicast IPv4 address within lan_cidr")
         if not host and not device_id:
@@ -67,6 +102,7 @@ class Discovery(asyncio.DatagramProtocol):
     def __init__(self, settings):
         self.settings = settings
         self.host = None
+        self.changed = asyncio.Event()
 
     def datagram_received(self, data, source):
         if not 1 <= len(data) <= 4096 or not self.settings.accepts(source[0]):
@@ -80,7 +116,8 @@ class Discovery(asyncio.DatagramProtocol):
                 and notice.get("ip") == source[0]):
             if self.host != source[0]:
                 LOG.info("Camera discovery broadcast received from %s", source[0])
-            self.host = source[0]
+                self.host = source[0]
+                self.changed.set()
 
 
 @dataclass(frozen=True)
@@ -105,6 +142,7 @@ class CameraState:
     def __init__(self, settings):
         self.settings = settings
         self.host = None
+        self.mac_address = None
         self.position = None
         self.samples = deque()
         self.frame = None
@@ -144,6 +182,7 @@ class CameraState:
                                temperature_c=sum(s.value[0] for s in samples) / count,
                                relative_humidity_percent=sum(s.value[1] for s in samples) / count)
         return dict(at_utc=utc, state="ready" if frame else "connecting" if self.host else "discovering",
+                    camera=dict(ip_address=self.host, mac_address=self.mac_address),
                     frame=frame, ptz_state=self.ptz_state, position=position, environment=environment)
 
     def _notify_frame(self):
@@ -232,10 +271,11 @@ class CameraState:
         position = Sample.now(steps)
         self.position = position
         self.host = host
+        self.mac_address = camera_mac_address(host)
         await asyncio.to_thread(self.save_host, host)
         LOG.info("Camera adopted at %s", host)
 
-    async def connected(self, host, controller):
+    async def connected(self, host, controller, discovery):
         failures = 0
         polls = [asyncio.create_task(self.poll(probe, host))
                  for probe in (self.position_sample, self.environment_sample)]
@@ -243,6 +283,8 @@ class CameraState:
             while failures < 3:
                 previous_frame = self.frame_id
                 try:
+                    if self.settings.disable_detection_regions:
+                        await camera.clear_detection_scopes(host)
                     await camera.stream(host, self.publish, self.microphone.publish)
                 except (ExceptionGroup, *READ_ERRORS) as error:
                     detail = error.exceptions[0] if isinstance(error, ExceptionGroup) else error
@@ -251,6 +293,8 @@ class CameraState:
                     self.clear_frame()
                     self.microphone.reset()
                     controller.stop_manual_for_video()
+                if discovery.changed.is_set() and discovery.host != host:
+                    break
                 failures = 0 if self.frame_id != previous_frame else failures + 1
                 if failures < 3:
                     await asyncio.sleep(RETRY_DELAYS[max(0, failures - 1)])
@@ -263,6 +307,7 @@ class CameraState:
             self.position = None
             self.samples.clear()
             self.host = None
+            self.mac_address = None
 
     async def run(self, controller):
         protocol = Discovery(self.settings)
@@ -276,8 +321,9 @@ class CameraState:
         failures = 0
         try:
             while True:
+                protocol.changed.clear()
                 saved = await asyncio.to_thread(self.saved_host)
-                candidates = dict.fromkeys((self.settings.camera_host, saved, protocol.host))
+                candidates = dict.fromkeys((protocol.host, self.settings.camera_host, saved))
                 for host in filter(None, candidates):
                     try:
                         await self.adopt(host)
@@ -286,8 +332,13 @@ class CameraState:
                         LOG.warning("Camera candidate %s rejected: %s", host, error)
                         continue
                     failures = 0
-                    await self.connected(host, controller)
-                await asyncio.sleep(RETRY_DELAYS[min(failures, len(RETRY_DELAYS) - 1)])
+                    await self.connected(host, controller, protocol)
+                    break
+                try:
+                    async with asyncio.timeout(RETRY_DELAYS[min(failures, len(RETRY_DELAYS) - 1)]):
+                        await protocol.changed.wait()
+                except TimeoutError:
+                    pass
                 failures += 1
         finally:
             if udp:

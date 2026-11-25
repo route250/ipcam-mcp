@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import suppress
 import logging
+import math
 from statistics import median
 from threading import Event
 
@@ -13,12 +14,15 @@ from .state import READ_ERRORS, Sample
 LOG = logging.getLogger(__name__)
 DIRECTIONS = dict(up="U", down="D", left="L", right="R")
 POSITION_TOLERANCE = 20
+ANGLE_INCREMENT = 20
 MAX_RETRIES = 3
 INITIAL_SPEEDS = {"L": 388.58875935930246, "R": 388.58875935930246, "U": 235.0, "D": 235.0}
 MOTOR_AXES = {"L": ("pan_steps", -1), "R": ("pan_steps", 1),
               "U": ("tilt_steps", -1), "D": ("tilt_steps", 1)}
 AXIS_DIRECTIONS = {"pan_steps": ("L", "R"), "tilt_steps": ("U", "D")}
 REVERSAL_SECONDS = {"pan_steps": 0.300, "tilt_steps": 0.390}
+TILT_MIN_PULSE_STEPS = 61
+TILT_APPROACH_STEPS = 110
 MIN_LEARNING_SECONDS = 0.25
 SPEED_CONFIRMATIONS = 3
 HOMING_TIMEOUT = 30
@@ -36,6 +40,16 @@ class ControlError(Exception):
 
 def stop_error():
     return ControlError("stop_unconfirmed", "The camera did not acknowledge stop")
+
+
+def round_target_angle(value, low, high):
+    multiple, remainder = divmod(abs(value), ANGLE_INCREMENT)
+    if remainder * 2 >= ANGLE_INCREMENT:
+        multiple += 1
+    angle = math.copysign(multiple * ANGLE_INCREMENT, value)
+    lowest = math.ceil(low / ANGLE_INCREMENT) * ANGLE_INCREMENT
+    highest = math.floor(high / ANGLE_INCREMENT) * ANGLE_INCREMENT
+    return min(highest, max(lowest, angle))
 
 
 class Controller:
@@ -381,21 +395,30 @@ class Controller:
                     message.update(failure.response())
                 self.notify(queue, message)
 
-    async def feedback(self, host, current, target):
+    async def feedback(self, host, current, target, *, skipped_axes=()):
         for attempt in range(1 + MAX_RETRIES):
             for axis, goal in target.items():
                 delta = goal - current[axis]
-                if abs(delta) <= POSITION_TOLERANCE:
+                if axis in skipped_axes or abs(delta) <= POSITION_TOLERANCE:
                     continue
-                direction = AXIS_DIRECTIONS[axis][delta > 0]
+                pulse_goal = goal
+                if (axis == "tilt_steps" and attempt < MAX_RETRIES
+                        and abs(delta) + POSITION_TOLERANCE < TILT_MIN_PULSE_STEPS):
+                    # Short tilt pulses travel about 57–61 steps even on reversal.
+                    # Back away first so the final approach can use a longer pulse.
+                    waypoint = goal - (TILT_APPROACH_STEPS if delta > 0 else -TILT_APPROACH_STEPS)
+                    if 0 <= waypoint <= ipcam_angles.STEP_LIMITS[axis]:
+                        pulse_goal = waypoint
+                travel = pulse_goal - current[axis]
+                direction = AXIS_DIRECTIONS[axis][travel > 0]
                 speed = self.speeds.get(host, INITIAL_SPEEDS)[direction]
                 previous = self.last_directions.get((host, axis))
                 reversal = REVERSAL_SECONDS[axis] if previous not in (None, direction) else 0.0
-                duration = min(10.0, max(0.02, abs(delta) / speed) + reversal)
+                duration = min(10.0, max(0.02, abs(travel) / speed) + reversal)
                 before = current
                 await self.pulse(host, direction, duration)
                 current = await self.settled_steps(host)
-                if attempt == 0:
+                if attempt == 0 and pulse_goal == goal:
                     if abs(goal - current[axis]) <= POSITION_TOLERANCE:
                         self.speed_samples.pop((host, direction), None)
                     elif not reversal:
@@ -403,12 +426,15 @@ class Controller:
                 LOG.debug("PTZ attempt %d %s %.3f s: %s → %s (target %s) reversal_extra=%.3fs",
                           attempt + 1, direction, duration, before, current, target, reversal)
             errors = {axis: current[axis] - goal for axis, goal in target.items()}
-            if all(abs(error) <= POSITION_TOLERANCE for error in errors.values()):
-                return dict(reached=True, position=self.state.status()["position"], target_steps=target,
-                            error_steps=errors, tolerance_steps=POSITION_TOLERANCE)
+            if all(axis in skipped_axes or abs(error) <= POSITION_TOLERANCE for axis, error in errors.items()):
+                result = dict(reached=True, position=self.state.status()["position"], target_steps=target,
+                              error_steps=errors, tolerance_steps=POSITION_TOLERANCE)
+                if skipped_axes:
+                    result["skipped_axes"] = list(skipped_axes)
+                return result
         raise ControlError("motion_failed", "The camera did not reach the target within three retries")
 
-    async def goto(self, pan, tilt, *, steps=False):
+    async def goto(self, pan, tilt, *, steps=False, round_to_20_degrees=True):
         limits = ipcam_angles.STEP_LIMITS if steps else ipcam_angles.ANGLE_LIMITS
         target = {}
         for (axis, bounds), value in zip(limits.items(), (pan, tilt)):
@@ -419,15 +445,18 @@ class Controller:
             if not valid_type or not low <= value <= high:
                 kind = "an integer" if steps else "a number"
                 raise ControlError("invalid_argument", f"{axis} must be {kind} from {low} to {high}")
-            target[axis] = value
+            target[axis] = value if steps or not round_to_20_degrees else round_target_angle(value, low, high)
         if not target:
             raise ControlError("invalid_argument", "Specify pan or tilt")
+        angle_target = None
         if not steps:
+            if round_to_20_degrees:
+                angle_target = target
             try:
-                target = ipcam_angles.angles_to_steps(pan, tilt)
+                target = ipcam_angles.angles_to_steps(target.get("pan_degrees"), target.get("tilt_degrees"))
             except ValueError as error:
                 raise ControlError("invalid_argument", str(error)) from None
-        operation = asyncio.create_task(self.goto_operation(target))
+        operation = asyncio.create_task(self.goto_operation(target, angle_target=angle_target))
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError:
@@ -435,7 +464,7 @@ class Controller:
             # The independent job keeps ownership through its final stop.
             raise
 
-    async def goto_operation(self, target):
+    async def goto_operation(self, target, *, angle_target=None):
         self.reserve(object(), "goto")
         host = self.host
         self.task = asyncio.current_task()
@@ -445,7 +474,13 @@ class Controller:
                 if not await self.acknowledge_stop(host):
                     raise stop_error()
                 current = await self.settled_steps(host)
-                return await self.feedback(host, current, {**current, **target})
+                skipped_axes = []
+                if angle_target:
+                    current_angles = ipcam_angles.angles_from_steps(current)
+                    for axis, angle in angle_target.items():
+                        if round_target_angle(current_angles[axis], *ipcam_angles.ANGLE_LIMITS[axis]) == angle:
+                            skipped_axes.append(axis.replace("_degrees", "_steps"))
+                return await self.feedback(host, current, {**current, **target}, skipped_axes=skipped_axes)
         except ControlError as error:
             stop_failed = error.code == "stop_unconfirmed"
             raise

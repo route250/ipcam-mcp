@@ -125,6 +125,11 @@ ap_ready() {
         "$BB" ifconfig ap0 | "$BB" grep -q 'inet addr:192\.168\.222\.1 '
 }
 
+vendor_network_ready() {
+    # hiapp opens the Tuya LAN listener (TCP 6668) after its initial Wi-Fi setup.
+    "$BB" awk '$2 ~ /:1A0C$/ && $4 == "0A" { found=1 } END { exit !found }' /proc/net/tcp
+}
+
 stop_our_process() {
     [ -s "$WORK/$1.pid" ] || return 0
     IFS= read -r pid < "$WORK/$1.pid" || return 0
@@ -247,20 +252,20 @@ boot() {
     [ -x "$WIFI/wpa_supplicant" ] || return 1
     [ -x "$WIFI/hostapd" ] || return 1
     remaining=60
-    while ! ap_ready || ! sd_mounted; do
+    while ! sd_mounted || ! ap_ready || ! vendor_network_ready; do
         if [ "$remaining" -le 0 ]; then
-            if wifiinfo_trial && sd_mounted; then
+            if wifiinfo_trial && sd_mounted && vendor_network_ready; then
                 echo 'Vendor AP did not start; attempting station mode directly'
                 break
             fi
-            echo 'Vendor AP or SD mount was not available within 60 seconds'
+            echo 'Vendor AP, Tuya LAN listener or SD mount was not available within 60 seconds'
             return 1
         fi
         sleep 1
         remaining=$((remaining - 1))
     done
-    # Let the vendor application finish its initial network handling.
-    sleep 20
+    IFS=' ' read -r ready_uptime _ < /proc/uptime
+    echo "Vendor network ready at ${ready_uptime}s uptime"
     check_sd || { echo 'Invalid SD Wi-Fi configuration'; return 1; }
     probe_ips=$(read_probes "$SD/lan-probe-ip") || return 1
     if ! wifiinfo_trial; then

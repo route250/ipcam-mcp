@@ -7,6 +7,7 @@ ACKs indicate protocol acceptance; they do not prove physical motor operation.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager, suppress
 import json
 import math
 import socket
@@ -20,6 +21,9 @@ else:
     from hank_camera import PACKET1, CaptureError, _DeadlineReached, _receive_frame
 
 
+STOP_SETUP_LEAD_SECONDS = 1.0
+
+
 class PTZError(Exception):
     """A PTZ request or its acknowledgement could not be confirmed."""
 
@@ -30,27 +34,53 @@ def _packet(direction: str, speed: int = 1) -> bytes:
     return bytes.fromhex("494e460f0001000100000008") + body
 
 
+def _remaining_timeout(timeout, deadline):
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _DeadlineReached
+    return min(timeout, remaining)
+
+
+@contextmanager
+def _authenticated_connection(host, port, timeout, *, deadline=None):
+    connect_timeout = _remaining_timeout(timeout, deadline)
+    with socket.create_connection((host, port), timeout=connect_timeout) as sock:
+        sock.settimeout(_remaining_timeout(timeout, deadline))
+        sock.sendall(PACKET1)
+        now = time.monotonic()
+        login_deadline = now + timeout if deadline is None else min(now + timeout, deadline)
+        command, body = _receive_frame(sock, login_deadline, timeout)
+        if command != 2 or len(body) != 8:
+            raise PTZError("Unexpected camera login response")
+        session, result, reserved = struct.unpack(">IHH", body)
+        if not session or result or reserved:
+            raise PTZError("Camera login was not accepted")
+        yield sock
+
+
+def _send_request(sock, direction, wait, *, before_send=None, speed=1):
+    sock.settimeout(wait)
+    sent_at = time.monotonic()
+    if before_send is not None:
+        before_send(sent_at)
+    sock.sendall(_packet(direction, speed))
+    _require_ack(sock, sent_at + wait, wait)
+
+
+def _require_ack(sock, deadline, timeout):
+    command, body = _receive_frame(sock, deadline, timeout)
+    if command != 16 or body != bytes(4):
+        raise PTZError("Unexpected PTZ acknowledgement")
+
+
 def _request(host, direction, *, port, timeout, duration=None, before_send=None, speed=1):
     """Authenticate, send one PTZ request, read its ACK, and close."""
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            sock.sendall(PACKET1)
-            command, body = _receive_frame(sock, time.monotonic() + timeout, timeout)
-            if command != 2 or len(body) != 8:
-                raise PTZError("Unexpected camera login response")
-            session, result, reserved = struct.unpack(">IHH", body)
-            if not session or result or reserved:
-                raise PTZError("Camera login was not accepted")
+        with _authenticated_connection(host, port, timeout) as sock:
             wait = timeout if duration is None else min(timeout, duration)
-            sent_at = time.monotonic()
-            if before_send is not None:
-                before_send(sent_at)
-            sock.settimeout(wait)
-            sock.sendall(_packet(direction, speed))
-            command, body = _receive_frame(sock, sent_at + wait, wait)
-            if command != 16 or body != bytes(4):
-                raise PTZError("Unexpected PTZ acknowledgement")
+            _send_request(sock, direction, wait, before_send=before_send, speed=speed)
             return {"direction": direction, "acknowledged": True}
     except (OSError, CaptureError, _DeadlineReached) as exc:
         raise PTZError(f"PTZ transport failed: {type(exc).__name__}") from exc
@@ -160,13 +190,18 @@ def main() -> int:
     return 0
 
 
+def _wait_until(deadline, cancelled):
+    while not cancelled():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(.02, remaining))
+    raise PTZError('movement interrupted by stop')
+
+
 def pulse(direction, *, host='192.168.0.123', port=90, timeout=1.0,
           duration=0.1, cancelled=lambda: False):
-    """Stop at the pulse deadline before waiting for the movement ACK.
-
-    Short pulses must not use the pulse duration as their ACK timeout.
-    This is the independently verified HTTP-feedback transport sequence.
-    """
+    """Prepare the stop connection up to one second before sending H."""
     _validate(host, port, timeout)
     if direction not in ('U', 'D', 'L', 'R') or not math.isfinite(duration) or not 0 < duration <= 10:
         raise ValueError('pulse must be U/D/L/R and duration in (0, 10]')
@@ -179,35 +214,35 @@ def pulse(direction, *, host='192.168.0.123', port=90, timeout=1.0,
         stop_sent_at.append(sent_at)
 
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            sock.sendall(PACKET1)
-            command, body = _receive_frame(sock, time.monotonic()+timeout, timeout)
-            if command != 2 or len(body) != 8:
-                raise PTZError('Unexpected camera login response')
-            session, status, reserved = struct.unpack('>IHH', body)
-            if not session or status or reserved:
-                raise PTZError('Camera login was not accepted')
+        with _authenticated_connection(host, port, timeout) as move_sock, ExitStack() as stop_connection:
+            stop_sock = None
+            if duration <= STOP_SETUP_LEAD_SECONDS:
+                stop_sock = stop_connection.enter_context(_authenticated_connection(host, port, timeout))
+            if cancelled():
+                raise PTZError('movement interrupted by stop')
+            move_sent_at = time.monotonic()
+            deadline = move_sent_at + duration
             try:
-                if cancelled():
-                    raise PTZError('movement interrupted by stop')
-                move_sent_at = time.monotonic()
-                sock.sendall(_packet(direction, 1))
-                deadline = time.monotonic() + duration
-                while time.monotonic() < deadline:
-                    if cancelled():
-                        raise PTZError('movement interrupted by stop')
-                    time.sleep(min(.02, max(0, deadline-time.monotonic())))
+                move_sock.sendall(_packet(direction, 1))
+                if stop_sock is None:
+                    _wait_until(deadline - STOP_SETUP_LEAD_SECONDS, cancelled)
+                    with suppress(OSError, CaptureError, _DeadlineReached, PTZError):
+                        stop_sock = stop_connection.enter_context(
+                            _authenticated_connection(host, port, timeout, deadline=deadline))
+                _wait_until(deadline, cancelled)
             finally:
                 stop_started_at = time.monotonic()
                 try:
-                    stop(host, port=port, timeout=timeout, before_send=record_stop)
-                except Exception:
+                    if stop_sock is None:
+                        stop(host, port=port, timeout=timeout, before_send=record_stop)
+                    else:
+                        _send_request(stop_sock, 'H', timeout, before_send=record_stop)
+                except (OSError, CaptureError, _DeadlineReached, PTZError):
+                    with suppress(OSError):
+                        stop_connection.close()
                     stop(host, port=port, timeout=timeout, before_send=record_stop)
                 stop_ack_at = time.monotonic()
-            command, body = _receive_frame(sock, time.monotonic()+timeout, timeout)
-            if command != 16 or body != bytes(4):
-                raise PTZError('Unexpected PTZ acknowledgement')
+            _require_ack(move_sock, time.monotonic() + timeout, timeout)
     except (OSError, CaptureError, _DeadlineReached) as exc:
         raise PTZError(f'PTZ pulse transport failed: {type(exc).__name__}') from exc
     return {'direction': direction, 'duration': duration, 'acknowledged': True,

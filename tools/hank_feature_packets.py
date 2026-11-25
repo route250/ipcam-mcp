@@ -1,4 +1,4 @@
-"""Build the INF time-setting packet used by the LAN server."""
+"""Build INF configuration packets used by the LAN server."""
 
 import struct
 
@@ -17,3 +17,12 @@ def time_set(epoch: int) -> bytes:
     struct.pack_into("<I", body, 84, 0)
     struct.pack_into("<i", body, 128, epoch)
     return frame(100, body)
+
+
+def scope_get(selector: int) -> bytes:
+    return frame(57, bytes([selector, 0, 0, 0]))
+
+
+def scope_clear(selector: int, height: int) -> bytes:
+    # Selector 0 is MD and 1 is PD. Both heights transport 18 row words.
+    return frame(55, bytes([2, 22, height, selector]) + bytes(18 * 4))

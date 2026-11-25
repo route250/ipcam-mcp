@@ -5,13 +5,12 @@ import wave
 
 import numpy as np
 
-from .audio_codec import RATE
+from .camera import MIC_SAMPLE_RATES
 
 WINDOW_SAMPLES = 1024
 HOP_SAMPLES = 128
 PCM_BYTES = 640
 SEQUENCE_BYTES = 4
-MAX_PROFILE_SAMPLES = 60 * RATE
 WINDOW = np.hanning(WINDOW_SAMPLES + 1)[:-1]
 WINDOW_POWER = WINDOW**2
 MIN_POWER_GAIN = 10 ** (-18 / 10)
@@ -20,17 +19,18 @@ MIN_POWER_GAIN = 10 ** (-18 / 10)
 def load_noise_profile(path):
     with wave.open(str(path), "rb") as source:
         length = source.getnframes()
-        if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, RATE):
-            raise ValueError("Noise profile WAV must be 8 kHz, mono, PCM16")
-        if not WINDOW_SAMPLES <= length <= MAX_PROFILE_SAMPLES:
-            raise ValueError("Noise profile WAV must contain 0.128 to 60 seconds")
+        sample_rate = source.getframerate()
+        if (source.getnchannels(), source.getsampwidth()) != (1, 2) or sample_rate not in MIC_SAMPLE_RATES:
+            raise ValueError("Noise profile WAV must be 8 or 16 kHz, mono, PCM16")
+        if not WINDOW_SAMPLES <= length <= 60 * sample_rate:
+            raise ValueError(f"Noise profile WAV must contain {WINDOW_SAMPLES / sample_rate} to 60 seconds")
         pcm = source.readframes(length)
         if len(pcm) != length * 2:
             raise ValueError("Noise profile WAV is truncated")
     samples = np.frombuffer(pcm, "<i2").astype(np.float64)
     samples -= samples.mean()
     windows = np.lib.stride_tricks.sliding_window_view(samples, WINDOW_SAMPLES)[::HOP_SAMPLES]
-    return np.mean(abs(np.fft.rfft(windows * WINDOW))**2, axis=0)
+    return sample_rate, np.mean(abs(np.fft.rfft(windows * WINDOW))**2, axis=0)
 
 
 class Denoiser:

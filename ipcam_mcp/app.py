@@ -14,6 +14,7 @@ from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
 from tools import ipcam_angles
 from .audio import Audio
+from .mic import Microphone
 from .ptz import ControlError, Controller
 from .state import CameraState
 
@@ -33,24 +34,29 @@ def move_schema(properties):
             "anyOf": [{"required": [axis]} for axis in properties]}
 
 
-async def move_target(controller, args, *, steps):
+async def move_target(controller, args, *, steps, round_to_20_degrees=True):
     properties = STEP_PROPERTIES if steps else ANGLE_PROPERTIES
     if set(args) - properties.keys() or any(value is None for value in args.values()):
         raise ControlError("invalid_argument", f"Provide one or both of {', '.join(properties)}")
     pan, tilt = (args.get(axis) for axis in properties)
-    return await controller.goto(pan, tilt, steps=steps)
+    return await controller.goto(pan, tilt, steps=steps, round_to_20_degrees=round_to_20_degrees)
 
 
 def mcp_app(state, controller, allowed_hosts=None):
+    goto_schema = move_schema(ANGLE_PROPERTIES)
+    goto_schema["properties"] = {**ANGLE_PROPERTIES, "round_to_20_degrees": {
+        "type": "boolean", "default": True,
+        "description": "Set false to use the supplied angles directly, for example to restore a measured pose.",
+    }}
     tools = [
         types.Tool(name="camera_get_info", description="Read current pan/tilt and environment measurements.",
                    inputSchema=EMPTY_SCHEMA, annotations=types.ToolAnnotations(readOnlyHint=True)),
         types.Tool(name="camera_snapshot", description="Read a 640×360 JPEG and its frame-time measurements.",
                    inputSchema=EMPTY_SCHEMA, annotations=types.ToolAnnotations(readOnlyHint=True)),
-        types.Tool(name="camera_goto", description="Move to calibrated pan/tilt angles in degrees.",
-                   inputSchema=move_schema(ANGLE_PROPERTIES)),
-        types.Tool(name="camera_goto_steps", description="Move to absolute pan/tilt motor step counts.",
-                   inputSchema=move_schema(STEP_PROPERTIES)),
+        types.Tool(name="camera_goto", description="Move to absolute pan/tilt angles in degrees. By default, "
+                   "round current and target angles to the nearest supported 20-degree increment and move "
+                   "axes whose rounded angles differ. Omit an axis to keep its position.",
+                   inputSchema=goto_schema),
     ]
 
     async def list_tools(_context, _params):
@@ -60,8 +66,12 @@ def mcp_app(state, controller, allowed_hosts=None):
         args = params.arguments or {}
         content = []
         try:
-            if params.name in {"camera_goto", "camera_goto_steps"}:
-                data = await move_target(controller, args, steps=params.name == "camera_goto_steps")
+            if params.name == "camera_goto":
+                angles = dict(args)
+                rounding = angles.pop("round_to_20_degrees", True)
+                if type(rounding) is not bool:
+                    raise ControlError("invalid_argument", "round_to_20_degrees must be a boolean")
+                data = await move_target(controller, angles, steps=False, round_to_20_degrees=rounding)
             elif params.name in {"camera_get_info", "camera_snapshot"}:
                 if args:
                     raise ControlError("invalid_argument", "This tool takes no arguments")
@@ -203,8 +213,11 @@ async def handle_ptz(websocket, controller):
 
 def create_app(settings, *, allowed_hosts=None, mic_noise_profile=None):
     state = CameraState(settings)
+    microphones = {"camera": state.microphone}
+    if settings.usb_mic_device is not None:
+        microphones["usb"] = Microphone()
     if mic_noise_profile is not None:
-        state.microphone.noise_profile = mic_noise_profile
+        microphones[settings.mic_source].noise_profile = mic_noise_profile
     controller = Controller(state)
     audio = Audio(state)
     mcp = mcp_app(state, controller, allowed_hosts)
@@ -212,14 +225,17 @@ def create_app(settings, *, allowed_hosts=None, mic_noise_profile=None):
     @asynccontextmanager
     async def lifespan(_app):
         async with mcp.router.lifespan_context(mcp):
-            camera_task = asyncio.create_task(state.run(controller))
+            tasks = [asyncio.create_task(state.run(controller))]
+            if "usb" in microphones:
+                tasks.append(asyncio.create_task(microphones["usb"].run_usb(settings.usb_mic_device)))
             try:
                 yield
             finally:
                 await audio.close()
                 await controller.close()
-                camera_task.cancel()
-                await asyncio.gather(camera_task, return_exceptions=True)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalRequests, allowed_hosts=allowed_hosts)
@@ -234,6 +250,11 @@ def create_app(settings, *, allowed_hosts=None, mic_noise_profile=None):
     async def status():
         return JSONResponse(state.status(), headers=NO_STORE)
 
+    @app.get("/api/mic")
+    async def mic_inputs():
+        return JSONResponse({"default": settings.mic_source, "sources": list(microphones)},
+                            headers=NO_STORE)
+
     @app.get("/api/stream.mjpg")
     async def stream():
         frame = state.current_frame()
@@ -247,7 +268,13 @@ def create_app(settings, *, allowed_hosts=None, mic_noise_profile=None):
         await handle_ptz(websocket, controller)
 
     @app.websocket("/mic")
-    async def mic(websocket: WebSocket, denoise: bool = False):
-        await state.microphone.subscribe(websocket, denoise=denoise)
+    async def mic(websocket: WebSocket, source: str | None = None,
+                  denoise: bool = False, metadata: bool = False):
+        microphone = microphones.get(settings.mic_source if source is None else source)
+        if microphone is None:
+            await websocket.accept()
+            await websocket.close(code=1008, reason="Microphone source is not available")
+            return
+        await microphone.subscribe(websocket, denoise=denoise, metadata=metadata)
 
     return app

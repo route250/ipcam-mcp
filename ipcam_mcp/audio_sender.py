@@ -7,7 +7,6 @@ from . import camera
 from .audio_codec import RATE
 
 FRAME_SAMPLES = camera.SPEAKER_FRAME_SAMPLES
-FRAME_SECONDS = FRAME_SAMPLES / RATE
 
 
 async def wait_until(deadline):
@@ -16,7 +15,9 @@ async def wait_until(deadline):
         await asyncio.sleep(delay)
 
 
-async def send_audio(host, payload, offset, indexes, started, progress):
+async def send_audio(host, payload, offset, indexes, started, progress, *, sample_rate=RATE):
+    source_frame_samples = FRAME_SAMPLES * RATE // sample_rate
+    frame_seconds = FRAME_SAMPLES / sample_rate
     loop = asyncio.get_running_loop()
     indexes = deque(indexes)
 
@@ -30,26 +31,31 @@ async def send_audio(host, payload, offset, indexes, started, progress):
         progress(end, False)
 
     async with camera.speaker(host) as writer:
-        for sequence, start in enumerate(range(offset, len(payload), FRAME_SAMPLES), 1):
+        for sequence, start in enumerate(range(offset, len(payload), source_frame_samples), 1):
             # Send one frame ahead of the estimated playback position.
             if sequence > 1:
-                played_samples = (sequence - 2) * FRAME_SAMPLES
+                played_samples = (sequence - 2) * source_frame_samples
                 await advance(origin, played_samples)
-            frame = payload[start:start + FRAME_SAMPLES].ljust(FRAME_SAMPLES, b"\xff")
-            await camera.send_speaker_frame(writer, frame, sequence)
+            frame = payload[start:start + source_frame_samples].ljust(source_frame_samples, b"\xff")
+            if sample_rate == 16000:
+                # Hold each 8 kHz sample for two samples at the camera's output rate.
+                expanded = bytearray(FRAME_SAMPLES)
+                expanded[::2] = expanded[1::2] = frame
+                frame = expanded
+            await camera.send_speaker_frame(writer, frame, sequence, sample_rate=sample_rate)
             sent_at = loop.time()
             if sequence == 1:
                 origin = sent_at
                 started()
             else:
                 delay = sent_at - (origin + played_samples / RATE)
-                if delay >= FRAME_SECONDS:
+                if delay >= frame_seconds:
                     # Restart the clock instead of catching up with a burst.
                     origin += delay
-        await advance(origin, sequence * FRAME_SAMPLES)
+        await advance(origin, sequence * source_frame_samples)
 
 
-async def send_in_worker(executor, host, payload, offset, indexes, started, progress):
+async def send_in_worker(executor, host, payload, offset, indexes, started, progress, *, sample_rate=RATE):
     owner = asyncio.get_running_loop()
     ready = owner.create_future()
 
@@ -57,7 +63,8 @@ async def send_in_worker(executor, host, payload, offset, indexes, started, prog
         owner.call_soon_threadsafe(ready.set_result, (asyncio.get_running_loop(), asyncio.current_task()))
         await send_audio(host, payload, offset, indexes,
                          lambda: owner.call_soon_threadsafe(started),
-                         lambda position, reached: owner.call_soon_threadsafe(progress, position, reached))
+                         lambda position, reached: owner.call_soon_threadsafe(progress, position, reached),
+                         sample_rate=sample_rate)
 
     result = owner.run_in_executor(executor, asyncio.run, send())
     try:

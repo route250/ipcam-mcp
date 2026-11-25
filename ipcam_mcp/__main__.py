@@ -52,6 +52,8 @@ def main():
             parser.error(f"Invalid microphone noise profile: {error}")
     if shutil.which("ffmpeg") is None:
         parser.error("ffmpeg is required")
+    if settings.usb_mic_device is not None and shutil.which("arecord") is None:
+        parser.error("arecord is required for a USB microphone")
     logging.basicConfig(level=logging.INFO)
     if args.debug:
         logging.getLogger("ipcam_mcp").setLevel(logging.DEBUG)

@@ -1,0 +1,52 @@
+#!/bin/sh
+# Optional boot hook for the camera's existing Telnet service.
+set -eu
+umask 077
+
+bb=/bin/busybox
+hash_file=/tmp/mmc/ipcam-telnet-root.hash
+passwd_file=/etc/passwd
+
+fail() {
+    echo "Telnet setup: $*" >&2
+    exit 1
+}
+
+[ -s "$hash_file" ] || fail 'missing local password hash'
+[ -f /mnt/flash/Server/etc/passwd ] || fail 'unsupported firmware layout'
+[ ! -e /etc/shadow ] || fail 'shadow passwords are unsupported'
+"$bb" awk '/^Uid:/ { seen = 1; if ($3 != 0) bad = 1 } END { exit (!seen || bad) }' \
+    /proc/self/status || fail 'requires root'
+
+work=$("$bb" mktemp -d /tmp/ipcam-telnet.XXXXXX)
+trap '"$bb" rm -rf "$work"' EXIT
+
+"$bb" awk -F: -v OFS=: '
+    FILENAME == ARGV[1] {
+        if (FNR != 1 || split($0, parts, /[$]/) != 4 ||
+            parts[1] != "" || parts[2] != "1" ||
+            parts[3] !~ /^[.\/0-9A-Za-z]+$/ || length(parts[3]) > 8 ||
+            parts[4] !~ /^[.\/0-9A-Za-z]+$/ || length(parts[4]) != 22) {
+            bad = 1
+            exit 1
+        }
+        hash = $0
+        next
+    }
+    $1 == "root" {
+        roots++
+        if (NF != 7 || $3 != "0" || $4 != "0" || $7 != "/bin/sh") bad = 1
+        $2 = hash
+    }
+    { print }
+    END { if (bad || hash == "" || roots != 1) exit 1 }
+' "$hash_file" "$passwd_file" > "$work/passwd" || fail 'invalid hash or unexpected passwd layout'
+
+"$bb" chmod 644 "$work/passwd"
+expected=$("$bb" md5sum < "$work/passwd")
+"$bb" mount --bind "$work/passwd" "$passwd_file" || fail 'bind mount failed'
+if ! actual=$("$bb" md5sum < "$passwd_file") || [ "$actual" != "$expected" ]; then
+    "$bb" umount "$passwd_file"
+    fail 'could not verify the mount'
+fi
+trap - EXIT

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from ipcam_mcp.ptz import Controller, ControlError, INITIAL_SPEEDS
+from tools import ipcam_angles
 
 HOST = "192.168.0.123"
 
@@ -68,6 +69,92 @@ class FeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["target_steps"], {"pan_steps": 2020, "tilt_steps": 891})
         self.assertEqual(result["error_steps"], {"pan_steps": 15, "tilt_steps": 9})
         controller.pulse.assert_not_awaited()
+
+    async def test_small_tilt_error_uses_a_longer_final_approach(self):
+        for start, waypoint, end, directions in (
+            (863, 781, 889, ("U", "D")),
+            (921, 1001, 893, ("D", "U")),
+        ):
+            with self.subTest(start=start):
+                controller = self.make_controller([(2035, start), (2035, waypoint), (2035, end)])
+                controller.pulse = Controller.pulse.__get__(controller)
+                timing = dict(wait_seconds=0.5, stop_setup_seconds=0.005, send_interval_seconds=0.505,
+                              stop_ack_seconds=0.55, stop_sends=1)
+                with patch("ipcam_mcp.ptz.hank_ptz.pulse", return_value=timing) as transport:
+                    result = await controller.goto(None, 0, round_to_20_degrees=False)
+                retreat, approach = transport.call_args_list
+                self.assertEqual((retreat.args[0], approach.args[0]), directions)
+                self.assertAlmostEqual(retreat.kwargs["duration"], abs(waypoint - start) / 235)
+                self.assertAlmostEqual(approach.kwargs["duration"], 110 / 235 + 0.390)
+                self.assertEqual(result["error_steps"]["tilt_steps"], end - 891)
+                self.assertEqual(controller.speed_samples, {})
+
+    async def test_small_tilt_error_uses_direct_pulse_when_waypoint_is_out_of_range(self):
+        controller = self.make_controller([(2035, 10), (2035, 55)])
+        result = await controller.goto(None, 35, steps=True)
+        controller.pulse.assert_awaited_once_with(HOST, "D", 25 / 235)
+        self.assertEqual(result["error_steps"]["tilt_steps"], 20)
+
+    async def test_last_tilt_attempt_keeps_the_original_target(self):
+        controller = self.make_controller([(2035, 853)] * 4 + [(2035, 910)])
+        result = await controller.goto(None, 0, round_to_20_degrees=False)
+        self.assertEqual([pulse.args[1] for pulse in controller.pulse.await_args_list],
+                         ["U", "U", "U", "D"])
+        self.assertEqual(result["error_steps"]["tilt_steps"], 19)
+
+    async def test_angle_targets_round_to_the_nearest_in_range_twenty_degrees(self):
+        cases = [
+            (29, -9.5, 20, 0),
+            (30, -10, 40, -20),
+            (-30, 10, -40, 20),
+            (177.5, -30, 160, -20),
+            (-177.5, 90, -160, 80),
+        ]
+        for pan, tilt, rounded_pan, rounded_tilt in cases:
+            with self.subTest(pan=pan, tilt=tilt):
+                target = ipcam_angles.angles_to_steps(rounded_pan, rounded_tilt)
+                controller = self.make_controller([(target["pan_steps"], target["tilt_steps"])])
+                result = await controller.goto(pan, tilt)
+                self.assertEqual(result["target_steps"], target)
+                controller.pulse.assert_not_awaited()
+
+    async def test_angle_rounding_preserves_an_unspecified_axis(self):
+        pan = ipcam_angles.angles_to_steps(20, None)["pan_steps"]
+        controller = self.make_controller([(2020, 893), (pan, 893)])
+        result = await controller.goto(24, None)
+        self.assertEqual(result["target_steps"], {"pan_steps": pan, "tilt_steps": 893})
+        controller.pulse.assert_awaited_once()
+
+    async def test_unrounded_angle_moves_within_one_twenty_degree_increment(self):
+        current = ipcam_angles.angles_to_steps(12, 3)
+        target = ipcam_angles.angles_to_steps(17.25, 3)
+        controller = self.make_controller([(current["pan_steps"], current["tilt_steps"]),
+                                           (target["pan_steps"], target["tilt_steps"])])
+        result = await controller.goto(17.25, None, round_to_20_degrees=False)
+        self.assertEqual(result["target_steps"], target)
+        self.assertNotIn("skipped_axes", result)
+        controller.pulse.assert_awaited_once()
+
+    async def test_goto_skips_axes_in_the_same_twenty_degree_increment(self):
+        current = ipcam_angles.angles_to_steps(12, -12)
+        target = ipcam_angles.angles_to_steps(20, -20)
+        controller = self.make_controller([(current["pan_steps"], current["tilt_steps"])])
+        result = await controller.goto(29, -29)
+        self.assertTrue(result["reached"])
+        self.assertEqual(result["target_steps"], target)
+        self.assertEqual(result["error_steps"], {axis: current[axis] - goal for axis, goal in target.items()})
+        self.assertEqual(result["skipped_axes"], ["pan_steps", "tilt_steps"])
+        controller.pulse.assert_not_awaited()
+
+    async def test_goto_moves_only_the_axis_in_a_different_increment(self):
+        current = ipcam_angles.angles_to_steps(9, -12)
+        target = ipcam_angles.angles_to_steps(20, -20)
+        controller = self.make_controller([(current["pan_steps"], current["tilt_steps"]),
+                                           (target["pan_steps"], current["tilt_steps"])])
+        result = await controller.goto(29, -29)
+        self.assertEqual(result["skipped_axes"], ["tilt_steps"])
+        self.assertEqual(controller.pulse.await_args.args[1], "R")
+        controller.pulse.assert_awaited_once()
 
     async def test_only_known_same_axis_reversals_add_time(self):
         controller = self.make_controller([

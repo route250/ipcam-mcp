@@ -18,10 +18,45 @@ if [ "${1:-}" = --keep-jst ]; then
     done
 fi
 
+set_camera_input_volume() (
+    config=/mnt/flash/data/hank_default_parameter.ini
+    source=$config
+    if [ ! -f "$source" ]; then
+        source=/mnt/flash/databak/hank_default_parameter.ini
+        [ -f "$source" ] || source=/mnt/flash/Server/databak/hank_default_parameter.ini
+    fi
+    [ -f "$source" ] || exit 1
+
+    updated=$("$BB" mktemp /tmp/ipcam-input-volume.XXXXXX) || exit 1
+    staged=
+    trap '"$BB" rm -f "$updated"; [ -z "$staged" ] || "$BB" rm -f "$staged"' EXIT
+    "$BB" awk '
+        /^[[:blank:]]*\[/ {
+            parameter = ($0 ~ /^[[:blank:]]*\[PARAMETER_ITEM\][[:space:]]*$/)
+        }
+        parameter && /^[[:blank:]]*InPutVolume[[:blank:]]*=/ {
+            count++
+            if (!sub(/=[[:blank:]]*[0-9]+/, "=5")) invalid = 1
+        }
+        { print }
+        END { if (count != 1 || invalid) exit 1 }
+    ' "$source" > "$updated" || exit 1
+
+    if [ "$source" = "$config" ]; then
+        current=$("$BB" md5sum < "$config") && desired=$("$BB" md5sum < "$updated") || exit 1
+        [ "$current" != "$desired" ] || exit 0
+    fi
+
+    staged=$("$BB" mktemp "$config.ipcam.XXXXXX") || exit 1
+    "$BB" cp -p "$source" "$staged" && "$BB" cat "$updated" > "$staged" &&
+        "$BB" mv "$staged" "$config" && "$BB" sync
+)
+
 if [ -s "$SD/ipcam-telnet-local.sh" ]; then
     /bin/sh "$SD/ipcam-telnet-local.sh" || echo 'Local Telnet setup failed'
 fi
 printf 'JST-9\n' > /tmp/TZ
+set_camera_input_volume || echo 'Camera microphone input volume setup failed'
 
 [ -x "$SD/ipcam-wifi-launch" ] || exit 0
 "$BB" mkdir "$WORK" 2>/dev/null || exit 0

@@ -228,3 +228,5 @@ __marimo__/
 /ipcam.json.*
 /sd-card/wpa_supplicant.conf
 /sd-card/lan-probe-ip
+ipcam-telnet-root.hash
+/sd-card/ipcam-telnet-local.sh

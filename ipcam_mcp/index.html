@@ -9,9 +9,8 @@
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
   main { width:min(100% - 32px, 1200px); margin:clamp(16px, 3vw, 36px) auto; }
-  .control-heading { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:4px 12px; }
   h2 { margin:0; font-size:16px; }
-  #connection { color:var(--accent); font-size:14px; }
+  #connection { color:var(--accent); }
   .layout { display:grid; grid-template-columns:minmax(0, 1fr); gap:16px; align-items:start; }
   figure { margin:0; width:100%; aspect-ratio:16/9; position:relative; display:grid; place-items:center; background:#070a0c; border-radius:12px; overflow:hidden; }
   figure img { position:absolute; width:100%; height:100%; object-fit:contain; }
@@ -19,6 +18,14 @@
   #placeholder { color:var(--muted); padding:12px; }
   section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
   .controls { display:grid; grid-template-columns:minmax(0, 1fr); gap:16px; }
+  .ptz-tabs { display:flex; gap:4px; margin-block-start:8px; }
+  .ptz-tabs button {
+    flex:auto; min-width:0; min-height:36px; padding:4px 6px;
+    color:var(--muted); background:transparent; border:1px solid var(--line); border-radius:8px;
+    font:inherit; font-size:14px; cursor:pointer;
+  }
+  .ptz-tabs button:hover { background:#283238; }
+  .ptz-tabs [aria-selected="true"] { color:var(--accent); background:#203832; border-color:#63897d; }
   #pad { position:relative; display:grid; place-items:center; width:min(144px, 100%); aspect-ratio:1; margin:12px auto 4px; background:#283238; border:1px solid #66767d; color:var(--ink); border-radius:50%; touch-action:none; user-select:none; cursor:grab; font:inherit; }
   :is(#pad, #homing, #goto):disabled { opacity:.5; cursor:default; }
   #pad:active { cursor:grabbing; }
@@ -32,31 +39,40 @@
   #pad[data-direction="up"] [data-dir="up"], #pad[data-direction="down"] [data-dir="down"],
   #pad[data-direction="left"] [data-dir="left"], #pad[data-direction="right"] [data-dir="right"] { color:var(--accent); transform:scale(1.25); }
   #motion, .result { margin:0; color:var(--muted); font-size:13px; }
-  #motion { min-height:1.5em; text-align:center; }
+  #motion { min-height:1.5em; margin-block-start:8px; text-align:center; }
   .result:not(:empty) { margin-block-start:8px; }
   #target-form { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-block-start:12px; }
   #target-form label { display:grid; gap:4px; color:var(--muted); font-size:14px; }
   .unit-field, #goto { grid-column:1 / -1; }
   #target-form .unit-field { grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); align-items:center; gap:12px; }
-  :is(#homing, #target-form input, #target-form select, #goto) {
+  :is(#homing, #target-form input, #target-form select, #goto, #mic-source, #mic-toggle, #tts-send) {
     width:100%; min-width:0; min-height:44px; padding:8px 12px;
     color:var(--ink); background:#283238; border:1px solid #66767d; border-radius:8px; font:inherit; font-size:14px;
   }
-  :is(#homing, #goto) { cursor:pointer; }
+  :is(#homing, #goto, #mic-toggle, #tts-send) { cursor:pointer; }
+  .mic-controls { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; }
+  #mic-source-label, #mic-status { color:var(--muted); font-size:13px; }
+  #mic-source-label { display:flex; align-items:center; gap:6px; }
+  .mic-controls :is(#mic-source, #mic-toggle) { width:auto; min-height:30px; padding:3px 8px; font-size:13px; }
+  #tts-form { display:grid; gap:10px; margin-block-start:12px; }
+  #tts-form label { display:grid; gap:6px; color:var(--muted); font-size:14px; }
+  #tts-text { width:100%; min-height:76px; resize:vertical; padding:8px 12px; color:var(--ink); background:#101417; border:1px solid #66767d; border-radius:8px; font:inherit; }
+  #tts-text:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  #tts-send:disabled { opacity:.5; cursor:default; }
   #homing { margin-block-start:12px; }
   #goto { color:var(--accent); background:#203832; border-color:#63897d; }
-  :is(#homing, #goto):enabled:hover { background:#36464a; }
-  :is(#homing, #target-form input, #target-form select, #goto):focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  .metrics { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; margin:0; }
+  :is(#homing, #goto, #mic-toggle, #tts-send):enabled:hover { background:#36464a; }
+  :is(.ptz-tabs button, #homing, #target-form input, #target-form select, #goto, #mic-source, #mic-toggle, #tts-send):focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .metrics { display:flex; flex-wrap:wrap; gap:8px 16px; margin:0; }
+  .metrics > div { min-width:0; }
+  .position-metric { flex:1 1 6rem; }
+  .environment-metric { flex:1 1 10rem; }
+  .network-metric { flex:1 1 15rem; }
   .metrics dt { color:var(--muted); font-size:13px; }
   .metrics dd { margin:2px 0 0; font-size:18px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
-  .metrics :is(small, .steps) { color:var(--muted); font-size:12px; }
-  @media (min-width:36rem) {
-    .metrics { grid-template-columns:repeat(4, minmax(0, 1fr)); }
-  }
-  @media (42rem <= width < 54rem) {
-    .controls { grid-template-columns:repeat(2, minmax(0, 1fr)); }
-  }
+  .metrics dd.address { font-size:13px; }
+  .metrics .steps { color:var(--muted); font-size:12px; }
+  #position-degrees { white-space:pre-wrap; }
   @media (min-width:54rem) {
     .layout { grid-template-columns:minmax(0, 1fr) 320px; column-gap:20px; grid-template-rows:auto 1fr; }
     .controls { grid-column:2; grid-row:1 / 3; }
@@ -71,51 +87,79 @@
       <span id="placeholder">映像を待機中</span>
       <img id="video" width="640" height="360" alt="カメラのライブ映像" hidden>
     </figure>
-    <div class="controls">
-      <section aria-labelledby="control-title">
-        <div class="control-heading">
-          <h2 id="control-title">手動操作</h2>
-          <span id="connection" role="status">カメラを確認中</span>
-        </div>
-        <button id="pad" type="button" aria-label="方向パッド。ドラッグまたは矢印キーで操作" disabled>
-          <span data-dir="up" aria-hidden="true">▲</span><span data-dir="down" aria-hidden="true">▼</span>
-          <span data-dir="left" aria-hidden="true">◀</span><span data-dir="right" aria-hidden="true">▶</span>
-          <span data-dir="center" aria-hidden="true"></span>
-        </button>
-        <p id="motion" role="status">停止中</p>
-        <button id="homing" type="button" disabled>原点復帰</button>
-        <p id="homing-result" class="result" role="status"></p>
-      </section>
-      <section aria-labelledby="target-title">
-        <h2 id="target-title">位置指定</h2>
-        <form id="target-form" aria-labelledby="target-title">
-          <label class="unit-field">指定単位<select id="target-unit">
-            <option value="steps">ステップ</option>
-            <option value="degrees">度</option>
-          </select></label>
-          <label>パン<input id="target-pan" type="number" min="0" max="4100" step="1"></label>
-          <label>チルト<input id="target-tilt" type="number" min="0" max="1140" step="1"></label>
-          <button id="goto" type="submit" disabled>指定位置へ移動</button>
-        </form>
-        <p id="goto-result" class="result" role="status"></p>
-      </section>
-    </div>
-    <section class="camera-info" aria-label="位置と温湿度">
+    <section class="camera-info" aria-label="カメラ情報">
       <dl class="metrics">
-        <div>
-          <dt>パン <small>角度は推定</small></dt>
-          <dd id="pan">取得不可</dd>
-          <dd id="pan-steps" class="steps">ステップ取得不可</dd>
+        <div class="position-metric">
+          <dt>pan/tilt</dt>
+          <dd id="position-degrees">----/---</dd>
+          <dd id="position-steps" class="steps" hidden></dd>
         </div>
-        <div>
-          <dt>チルト <small>角度は推定</small></dt>
-          <dd id="tilt">取得不可</dd>
-          <dd id="tilt-steps" class="steps">ステップ取得不可</dd>
+        <div class="environment-metric">
+          <dt>温度 / 湿度</dt>
+          <dd><span id="temperature">---</span>/<span id="humidity">---</span></dd>
         </div>
-        <div><dt>温度</dt><dd id="temperature">取得不可</dd></div>
-        <div><dt>相対湿度</dt><dd id="humidity">取得不可</dd></div>
+        <div class="network-metric">
+          <dt>IP / HW</dt>
+          <dd class="address">
+            <span id="connection" role="status">サーバーに接続中</span>
+            <span id="camera-address" hidden><bdi id="camera-ip">---</bdi>/<bdi id="camera-mac">---</bdi></span>
+          </dd>
+        </div>
       </dl>
     </section>
+    <div class="controls">
+      <section aria-labelledby="control-title">
+        <h2 id="control-title">パン・チルト</h2>
+        <div class="ptz-tabs" role="tablist" aria-labelledby="control-title">
+          <button id="pad-tab" type="button" role="tab" aria-controls="pad-panel" aria-selected="true">手動操作パッド</button>
+          <button id="target-tab" type="button" role="tab" aria-controls="target-panel" aria-selected="false" tabindex="-1">位置指定</button>
+          <button id="other-tab" type="button" role="tab" aria-controls="other-panel" aria-selected="false" tabindex="-1">その他</button>
+        </div>
+        <div id="pad-panel" role="tabpanel" aria-labelledby="pad-tab">
+          <button id="pad" type="button" aria-label="方向パッド。ドラッグまたは矢印キーで操作" disabled>
+            <span data-dir="up" aria-hidden="true">▲</span><span data-dir="down" aria-hidden="true">▼</span>
+            <span data-dir="left" aria-hidden="true">◀</span><span data-dir="right" aria-hidden="true">▶</span>
+            <span data-dir="center" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div id="target-panel" role="tabpanel" aria-labelledby="target-tab" hidden>
+          <form id="target-form" aria-labelledby="target-tab">
+            <label class="unit-field">指定単位<select id="target-unit">
+              <option value="degrees" selected>角度（20°刻み）</option>
+              <option value="steps">ステップ</option>
+            </select></label>
+            <label>パン<input id="target-pan" type="number" min="-177.5" max="177.5" step="any"></label>
+            <label>チルト<input id="target-tilt" type="number" min="-30" max="90" step="any"></label>
+            <button id="goto" type="submit" disabled>指定位置へ移動</button>
+          </form>
+          <p id="goto-result" class="result" role="status"></p>
+        </div>
+        <div id="other-panel" role="tabpanel" aria-labelledby="other-tab" hidden>
+          <button id="homing" type="button" disabled>原点復帰</button>
+          <p id="homing-result" class="result" role="status"></p>
+        </div>
+        <p id="motion" role="status">停止中</p>
+      </section>
+      <section class="mic-controls" aria-label="マイク操作">
+        <label id="mic-source-label">
+          マイク
+          <select id="mic-source" disabled>
+            <option value="camera">カメラマイク</option>
+            <option value="usb" disabled>USBマイク</option>
+          </select>
+        </label>
+        <button id="mic-toggle" type="button" disabled>再生</button>
+        <span id="mic-status" role="status"></span>
+      </section>
+      <section aria-labelledby="tts-title">
+        <h2 id="tts-title">読み上げ</h2>
+        <form id="tts-form">
+          <label>読み上げるテキスト<textarea id="tts-text" rows="3" required></textarea></label>
+          <button id="tts-send" type="submit">カメラで読み上げ</button>
+        </form>
+        <p id="tts-status" class="result" role="status"></p>
+      </section>
+    </div>
   </div>
 </main>
 <script>
@@ -123,7 +167,7 @@
   const $ = id => document.getElementById(id);
   const video = $("video"), placeholder = $("placeholder"), pad = $("pad"), homing = $("homing");
   const unit = $("target-unit"), pan = $("target-pan"), tilt = $("target-tilt"), go = $("goto");
-  const cameraLabels = {discovering:"カメラを探索中", connecting:"映像に接続中", ready:"配信中"};
+  const cameraLabels = {discovering:"カメラを探索中", connecting:"映像に接続中", ready:""};
   const motionLabels = {idle:"停止中", manual:"手動移動中", goto:"指定位置へ移動中", stopping:"停止処理中",
     stop_unconfirmed:"停止を確認できません", homing:"原点復帰中", homing_unconfirmed:"原点復帰の完了を確認できません"};
   const errors = {busy:"ほかの操作が実行中です", camera_unavailable:"カメラに接続できません",
@@ -131,6 +175,173 @@
   const keys = {ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right"};
   let ws, pointer = null, key = null, direction = null, cameraReady = false;
   let motion = "idle", homingPending = false, gotoPending = false;
+
+  const tabs = [...document.querySelectorAll(".ptz-tabs button")];
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => {
+      if (tab.getAttribute("aria-selected") === "true") return;
+      release();
+      for (const candidate of tabs) {
+        const selected = candidate === tab;
+        candidate.setAttribute("aria-selected", selected);
+        candidate.tabIndex = selected ? 0 : -1;
+        $(candidate.getAttribute("aria-controls")).hidden = !selected;
+      }
+    });
+    tab.addEventListener("keydown", event => {
+      const rtl = getComputedStyle(tab).direction === "rtl";
+      let next;
+      switch (event.key) {
+        case "ArrowLeft": next = index + (rtl ? 1 : -1); break;
+        case "ArrowRight": next = index + (rtl ? -1 : 1); break;
+        case "Home": next = 0; break;
+        case "End": next = tabs.length - 1; break;
+        default: return;
+      }
+      event.preventDefault();
+      const nextTab = tabs[(next + tabs.length) % tabs.length];
+      nextTab.focus();
+      nextTab.click();
+    });
+  });
+
+  const micSource = $("mic-source"), micToggle = $("mic-toggle"), micStatus = $("mic-status");
+  let micPlayer;
+
+  fetch("/api/mic", {signal: AbortSignal.timeout(3000)}).then(async response => {
+    if (!response.ok) return;
+    const {default: defaultSource, sources} = await response.json();
+    micSource.options[1].disabled = !sources.includes("usb");
+    micSource.value = defaultSource;
+  }).catch(() => {}).finally(() => {
+    micSource.disabled = micSource.options[1].disabled;
+    micToggle.disabled = false;
+  });
+
+  function stopMic(message = "") {
+    const player = micPlayer;
+    micPlayer = undefined;
+    player?.socket?.close();
+    player?.context?.close();
+    micToggle.textContent = "再生";
+    micStatus.textContent = message;
+  }
+
+  async function playMic() {
+    const player = {sampleRate: 0, frameSamples: 320, nextTime: 0};
+    micPlayer = player;
+    try {
+      player.context = new AudioContext();
+      micToggle.textContent = "停止";
+      micStatus.textContent = "音声を待機中";
+      await player.context.resume();
+      if (micPlayer !== player) return;
+      const url = new URL("/mic?metadata=1", location.href);
+      url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("source", micSource.value);
+      player.socket = new WebSocket(url);
+      player.socket.binaryType = "arraybuffer";
+      player.socket.onclose = () => {
+        if (micPlayer === player) stopMic("マイクの接続が切れました");
+      };
+      player.socket.onmessage = ({data}) => {
+        if (micPlayer !== player) return;
+        if (typeof data === "string") {
+          const format = JSON.parse(data);
+          const frameSamples = format.frame_samples ?? 320;
+          if (format.type !== "format" || ![8000, 16000].includes(format.sample_rate)
+              || ![320, format.sample_rate * 40 / 1000].includes(frameSamples)) {
+            stopMic("音声形式に対応していません");
+            return;
+          }
+          player.sampleRate = format.sample_rate;
+          player.frameSamples = frameSamples;
+          return;
+        }
+        if (data.byteLength !== 4 + 2 * player.frameSamples || !player.sampleRate) {
+          stopMic("音声フレームを読み込めません");
+          return;
+        }
+        const pcm = new DataView(data, 4);
+        const buffer = player.context.createBuffer(1, player.frameSamples, player.sampleRate);
+        const samples = buffer.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) samples[i] = pcm.getInt16(i * 2, true) / 32768;
+        const now = player.context.currentTime;
+        if (player.nextTime > now + 0.25) return;
+        if (player.nextTime < now) player.nextTime = now + 0.06;
+        const source = player.context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(player.context.destination);
+        source.start(player.nextTime);
+        player.nextTime += buffer.duration;
+        micStatus.textContent = `再生中（${player.sampleRate / 1000} kHz）`;
+      };
+    } catch {
+      if (micPlayer === player) stopMic("マイクを再生できません");
+    }
+  }
+  micToggle.onclick = () => {
+    if (micPlayer) stopMic();
+    else playMic();
+  };
+  micSource.onchange = () => {
+    if (!micPlayer) return;
+    stopMic();
+    playMic();
+  };
+  addEventListener("pagehide", () => stopMic());
+
+  const ttsForm = $("tts-form"), ttsSend = $("tts-send"), ttsStatus = $("tts-status");
+  let speechEvents;
+
+  ttsForm.onsubmit = event => {
+    event.preventDefault();
+    if (speechEvents) return;
+    const content = $("tts-text").value.trim();
+    if (!content || new TextEncoder().encode(content).length > 8192) {
+      ttsStatus.textContent = "8,192バイト以内のテキストを入力してください";
+      return;
+    }
+    ttsSend.disabled = true;
+    ttsStatus.textContent = "接続中";
+    const events = new EventSource("/audio");
+    speechEvents = events;
+
+    function finish(message) {
+      if (speechEvents !== events) return;
+      events.close();
+      speechEvents = undefined;
+      ttsSend.disabled = false;
+      ttsStatus.textContent = message;
+    }
+
+    events.addEventListener("session", async ({data}) => {
+      try {
+        const {session} = JSON.parse(data);
+        ttsStatus.textContent = "音声を準備中";
+        const response = await fetch("/tts", {
+          method: "POST",
+          headers: {"Content-Type": "text/plain; charset=utf-8", "X-Audio-Session": session},
+          body: content
+        });
+        if (!response.ok) finish("読み上げを開始できません");
+      } catch {
+        finish("読み上げを開始できません");
+      }
+    }, {once: true});
+    events.addEventListener("start", () => {
+      if (speechEvents === events) ttsStatus.textContent = "読み上げ中";
+    });
+    events.addEventListener("end", ({data}) => {
+      finish(JSON.parse(data).reason === "completed" ? "読み上げが完了しました" : "読み上げが途中で終了しました");
+    });
+    events.onerror = () => finish("読み上げサービスに接続できません");
+  };
+  addEventListener("pagehide", () => {
+    speechEvents?.close();
+    speechEvents = undefined;
+    ttsSend.disabled = false;
+  });
 
   function refreshControls() {
     const connected = cameraReady && ws?.readyState === WebSocket.OPEN;
@@ -163,9 +374,14 @@
         gotoPending = false;
         const messages = {motion_failed:"指定位置に到達できませんでした。現在の位置を確認してください。",
           position_unavailable:"現在のステップ値を取得できませんでした。"};
-        $("goto-result").textContent = event.ok
-          ? `指定位置に到達しました（許容差 ${event.tolerance_steps} ステップ）。`
-          : messages[event.code] ?? errors[event.code] ?? event.message;
+        if (event.ok && event.skipped_axes?.length) {
+          const axes = event.skipped_axes.map(axis => axis === "pan_steps" ? "パン" : "チルト");
+          $("goto-result").textContent = `操作完了。${axes.join("・")}は現在位置と目標が同じ20°刻みのため移動を省略しました。`;
+        } else {
+          $("goto-result").textContent = event.ok
+            ? `指定位置に到達しました（許容差 ${event.tolerance_steps} ステップ）。`
+            : messages[event.code] ?? errors[event.code] ?? event.message;
+        }
         refreshControls();
       } else if (event.type === "homing_result") {
         homingPending = false;
@@ -273,28 +489,44 @@
   video.onload = () => { video.hidden = false; placeholder.hidden = true; };
   video.onerror = () => showFeed(false);
 
-  function showNumber(id, value, unit, missing = "取得不可", digits = 1) {
-    $(id).textContent = value === null ? missing : value.toFixed(digits) + unit;
+  function showNumber(id, value, unit) {
+    $(id).textContent = value == null ? "---" : value.toFixed(1) + unit;
+  }
+  function formatAngle(value, width) {
+    return value == null ? "-".repeat(width) : String(Math.trunc(value)).padStart(width);
+  }
+  function showConnection(message, camera = {}) {
+    const connection = $("connection");
+    if (connection.textContent !== message) connection.textContent = message;
+    $("camera-address").hidden = message !== "";
+    $("camera-ip").textContent = camera.ip_address ?? "---";
+    $("camera-mac").textContent = camera.mac_address ?? "---";
+  }
+  function showMetrics({position = {}, environment = {}} = {}) {
+    const {pan_degrees, tilt_degrees, pan_steps, tilt_steps} = position;
+    const degreesUnit = pan_degrees == null && tilt_degrees == null ? "" : "°";
+    $("position-degrees").textContent = `${formatAngle(pan_degrees, 4)}/${formatAngle(tilt_degrees, 3)}${degreesUnit}`;
+    const steps = $("position-steps");
+    steps.hidden = pan_steps == null || tilt_steps == null;
+    steps.textContent = steps.hidden ? "" : `${pan_steps}/${tilt_steps}step`;
+    showNumber("temperature", environment.temperature_c, " ℃");
+    showNumber("humidity", environment.relative_humidity_percent, " %RH");
   }
   async function poll() {
     try {
       const response = await fetch("/api/status", {signal:AbortSignal.timeout(2000)});
       if (!response.ok) throw Error();
       const status = await response.json();
-      $("connection").textContent = cameraLabels[status.state];
+      showConnection(cameraLabels[status.state], status.camera);
       cameraReady = status.frame !== null;
       showFeed(cameraReady);
       showMotion(status.ptz_state);
-      showNumber("pan", status.position.pan_degrees, "°");
-      showNumber("tilt", status.position.tilt_degrees, "°");
-      showNumber("pan-steps", status.position.pan_steps, " ステップ", "ステップ取得不可", 0);
-      showNumber("tilt-steps", status.position.tilt_steps, " ステップ", "ステップ取得不可", 0);
-      showNumber("temperature", status.environment.temperature_c, " ℃");
-      showNumber("humidity", status.environment.relative_humidity_percent, " %RH");
+      showMetrics(status);
     } catch {
       cameraReady = false;
       showFeed(false);
-      $("connection").textContent = "サーバーに再接続中";
+      showConnection("サーバーに再接続中");
+      showMetrics();
     } finally {
       refreshControls();
       setTimeout(poll, 1000);
