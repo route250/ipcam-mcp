@@ -142,14 +142,14 @@ class AudioTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(frame, bytes.fromhex("d30201001f400010") +
                          struct.pack(">IIII", 1, 320, 0, 0) + b"\xff" * 320)
         await self.post("/audio/pause", 204)
-        second = await self.upload(320)
+        second = await self.upload(320, "0")
         with self.assertRaises(TimeoutError):
             await asyncio.wait_for(outgoing.get(), 0.24)
         await self.post("/audio/resume", 204)
         self.assertEqual(await self.event(outgoing, "index"), {"id": first, "index": 1600})
         await self.post("/audio/cancel", 204)
         self.assertEqual(await self.event(outgoing, "end"),
-                         {"id": first, "length": 8000, "reason": "cancelled"})
+                         {"id": first, "length": 8000, "reason": "completed"})
         self.assertEqual(await self.event(outgoing, "end"),
                          {"id": second, "length": 320, "reason": "cancelled"})
 
@@ -269,10 +269,11 @@ PY
 
         self.enterContext(patch("ipcam_mcp.audio.synthesize", synthesize))
         outgoing = await self.connect_audio()
-        speech = await self.speak("再生中、合成中。最後。", "8000")
+        speech = await self.speak("再生中、合成中。最後。", "0,8000")
         self.assertEqual(await self.receive(calls), "再生中")
         self.assertEqual(await self.receive(calls), "合成中。")
         self.assertEqual(await self.event(outgoing, "start"), {"id": speech})
+        self.assertEqual(await self.event(outgoing, "index"), {"id": speech, "index": 0})
         await self.post("/audio/cancel", 204)
         self.assertTrue(cancelled.is_set())
         self.assertTrue(calls.empty())
@@ -283,6 +284,23 @@ PY
         self.assertEqual(await self.event(outgoing, "start"), {"id": pcm})
         self.assertEqual(await self.event(outgoing, "end"),
                          {"id": pcm, "length": 320, "reason": "completed"})
+
+    async def test_tts_cancel_after_final_index_reports_completion_only_for_active_job(self):
+        async def synthesize(text, max_samples):
+            return bytes(2 * 40_000)
+
+        self.enterContext(patch("ipcam_mcp.audio.synthesize", synthesize))
+        outgoing = await self.connect_audio()
+        speech = await self.speak("再生中。", "0,8000")
+        queued = await self.speak("待機中。", "0")
+        self.assertEqual(await self.event(outgoing, "start"), {"id": speech})
+        for index in (0, 8000):
+            self.assertEqual(await self.event(outgoing, "index"), {"id": speech, "index": index})
+        await self.post("/audio/cancel", 204)
+        self.assertEqual(await self.event(outgoing, "end"),
+                         {"id": speech, "length": 40_000, "reason": "completed"})
+        self.assertEqual(await self.event(outgoing, "end"),
+                         {"id": queued, "length": None, "reason": "cancelled"})
 
     async def test_cancel_during_synthesis_stops_child_and_clears_queue(self):
         directory = self.tts_command("""

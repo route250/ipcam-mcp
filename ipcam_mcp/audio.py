@@ -35,6 +35,7 @@ class Job:
     payload_start: int = 0
     offset: int = 0
     started: bool = False
+    completion_index_reached: bool = False
 
     @property
     def length(self):
@@ -78,7 +79,8 @@ class Session:
     def discard(self):
         self.generation += 1
         if self.active is not None:
-            self.finish(self.active, "cancelled")
+            reason = "completed" if self.active.completion_index_reached else "cancelled"
+            self.finish(self.active, reason)
             self.active = None
         while self.pending:
             self.finish(self.pending.popleft(), "cancelled")
@@ -200,6 +202,7 @@ class Session:
                 job.offset = job.payload_start + offset
                 if reached:
                     job.indexes.popleft()
+                    job.completion_index_reached = not job.indexes
                     self.emit("index", id=job.id, index=job.offset)
 
         try:
