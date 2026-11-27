@@ -124,7 +124,8 @@ class Session:
                 continue
             self.active = None
             if isinstance(reason, BaseException):
-                LOG.error("Unexpected audio playback failure", exc_info=reason)
+                LOG.error("Unexpected audio playback failure: id=%d started=%s offset=%d length=%s (8 kHz samples)",
+                          job.id, job.started, job.offset, job.length, exc_info=reason)
                 reason = "failed"
             self.finish(job, reason)
 
@@ -152,8 +153,6 @@ class Session:
                 synthesis = None
                 section = next(sections, None)
                 length = job.offset + len(payload)
-                if section is None and job.indexes and job.indexes[-1] > length:
-                    raise ValueError("Indexes exceed the synthesized audio length")
                 job.payload_start = job.offset
                 job.payload = payload
                 await self.wait_resumed()
@@ -164,7 +163,8 @@ class Session:
                     return reason
             return "completed"
         except (OSError, ValueError) as error:
-            LOG.warning("Speech synthesis failed: %s", error)
+            LOG.warning("Speech synthesis failed: id=%d started=%s offset=%d length=%s (8 kHz samples): %s: %s",
+                        job.id, job.started, job.offset, job.length, type(error).__name__, error)
             return "failed"
         finally:
             if synthesis is not None:
@@ -190,6 +190,9 @@ class Session:
         host = self.state.host
         sample_rate = self.state.microphone.sample_rate
         if not host or sample_rate not in camera.MIC_SAMPLE_RATES:
+            LOG.warning("Audio playback unavailable: id=%d started=%s offset=%d length=%s (8 kHz samples), "
+                        "camera_connected=%s sample_rate=%s",
+                        job.id, job.started, job.offset, job.length, bool(host), sample_rate)
             return "failed"
 
         def started():
@@ -210,7 +213,8 @@ class Session:
             await send_in_worker(self.sender, host, job.payload, job.offset - job.payload_start, indexes,
                                  started, progress, sample_rate=sample_rate)
         except AUDIO_ERRORS as error:
-            LOG.warning("Audio playback failed: %s", error)
+            LOG.warning("Audio playback failed: id=%d started=%s offset=%d length=%s (8 kHz samples): %s: %s",
+                        job.id, job.started, job.offset, job.length, type(error).__name__, error)
             return "failed"
         return "completed"
 

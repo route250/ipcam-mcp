@@ -188,8 +188,8 @@ PY
         text = 'カメラです"$(false)"。'
         speech = await self.speak(text, "0,320")
         pcm = await self.upload(320)
-        invalid = await self.speak("範囲外の通知位置", "321")
-        self.assertEqual((speech, pcm, invalid), (1, 2, 3))
+        short = await self.speak("短い区間", "8000")
+        self.assertEqual((speech, pcm, short), (1, 2, 3))
         self.assertFalse((directory / "text").exists())
 
         await self.post("/audio/resume", 204)
@@ -202,8 +202,9 @@ PY
         self.assertEqual(await self.event(outgoing, "start"), {"id": pcm})
         self.assertEqual(await self.event(outgoing, "end"),
                          {"id": pcm, "length": 320, "reason": "completed"})
+        self.assertEqual(await self.event(outgoing, "start"), {"id": short})
         self.assertEqual(await self.event(outgoing, "end"),
-                         {"id": invalid, "length": None, "reason": "failed"})
+                         {"id": short, "length": 320, "reason": "completed"})
 
     async def test_tts_plays_first_section_before_next_is_ready_and_resumes_after_pause(self):
         calls = asyncio.Queue()
@@ -253,6 +254,31 @@ PY
                          {"id": after_idle, "length": 640, "reason": "completed"})
         self.assertEqual([calls.get_nowait() for _ in range(2)], ["もう一度", "試します。"])
         self.assertTrue(calls.empty())
+
+    async def test_failed_later_tts_section_ends_before_next_job_starts(self):
+        fail_second = asyncio.Event()
+
+        async def synthesize(text, max_samples):
+            if text == "次の文。":
+                await fail_second.wait()
+                raise OSError("mock synthesis failure")
+            return bytes(640)
+
+        self.enterContext(patch("ipcam_mcp.audio.synthesize", synthesize))
+        outgoing = await self.connect_audio()
+        speech = await self.speak("最初の文。次の文。")
+        self.assertEqual(await self.event(outgoing, "start"), {"id": speech})
+        queued = await self.speak("次の再生。")
+
+        with self.assertLogs("ipcam_mcp.audio", level="WARNING") as logs:
+            fail_second.set()
+            self.assertEqual(await self.event(outgoing, "end"),
+                             {"id": speech, "length": 320, "reason": "failed"})
+        self.assertIn(f"id={speech} started=True offset=320 length=320", logs.output[0])
+        self.assertIn("OSError: mock synthesis failure", logs.output[0])
+        self.assertEqual(await self.event(outgoing, "start"), {"id": queued})
+        self.assertEqual(await self.event(outgoing, "end"),
+                         {"id": queued, "length": 320, "reason": "completed"})
 
     async def test_cancel_while_playing_stops_next_tts_section(self):
         calls = asyncio.Queue()
